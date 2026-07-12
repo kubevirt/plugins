@@ -20,7 +20,6 @@ type pluginCRData struct {
 }
 
 type domainHookTmplData struct {
-	Type            string
 	Socket          string
 	Condition       string
 	FailureStrategy string
@@ -49,9 +48,8 @@ spec:
 {{- if .DomainHooks }}
   domainHooks:
 {{- range .DomainHooks }}
-  - type: {{ .Type }}
-    sidecar:
-      socket: {{ .Socket }}
+  - sidecar:
+      socketPath: {{ .Socket }}
 {{- if .Condition }}
     condition: "{{ .Condition }}"
 {{- end }}
@@ -337,7 +335,6 @@ func (p *Plugin) renderPluginCR() (string, error) {
 		first := hooks[0]
 
 		domainHookData := domainHookTmplData{
-			Type:   "Sidecar",
 			Socket: DomainSocketPathForEntrypoint(p.name, entrypoint),
 		}
 		if first.condition != "" {

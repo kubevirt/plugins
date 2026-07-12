@@ -23,9 +23,8 @@ type testPluginCR struct {
 		Condition       string `yaml:"condition,omitempty"`
 		FailureStrategy string `yaml:"failureStrategy,omitempty"`
 		DomainHooks     []struct {
-			Type    string `yaml:"type"`
 			Sidecar struct {
-				Socket string `yaml:"socket"`
+				SocketPath string `yaml:"socketPath"`
 			} `yaml:"sidecar"`
 			Condition       string `yaml:"condition,omitempty"`
 			FailureStrategy string `yaml:"failureStrategy,omitempty"`
@@ -309,12 +308,8 @@ func TestGeneratePluginCRDomainHookOnly(t *testing.T) {
 		t.Fatalf("expected 1 domainHook, got %d", len(cr.Spec.DomainHooks))
 	}
 
-	if cr.Spec.DomainHooks[0].Type != "Sidecar" {
-		t.Fatalf("expected type Sidecar, got %q", cr.Spec.DomainHooks[0].Type)
-	}
-
-	if cr.Spec.DomainHooks[0].Sidecar.Socket != "/var/run/kubevirt-plugin/test-plugin/domain.sock" {
-		t.Fatalf("expected sidecar socket path, got %q", cr.Spec.DomainHooks[0].Sidecar.Socket)
+	if cr.Spec.DomainHooks[0].Sidecar.SocketPath != "/var/run/kubevirt-plugin/test-plugin/domain.sock" {
+		t.Fatalf("expected sidecar socket path, got %q", cr.Spec.DomainHooks[0].Sidecar.SocketPath)
 	}
 
 	if len(cr.Spec.NodeHooks) != 0 {
@@ -968,12 +963,12 @@ func TestGenerateMultiEntrypointPluginCR(t *testing.T) {
 		t.Fatalf("expected 1 nodeHook in CR, got %d", len(cr.Spec.NodeHooks))
 	}
 
-	if cr.Spec.DomainHooks[0].Sidecar.Socket != "/var/run/kubevirt-plugin/test-plugin/ep-a/domain.sock" {
-		t.Fatalf("expected ep-a socket path, got %q", cr.Spec.DomainHooks[0].Sidecar.Socket)
+	if cr.Spec.DomainHooks[0].Sidecar.SocketPath != "/var/run/kubevirt-plugin/test-plugin/ep-a/domain.sock" {
+		t.Fatalf("expected ep-a socket path, got %q", cr.Spec.DomainHooks[0].Sidecar.SocketPath)
 	}
 
-	if cr.Spec.DomainHooks[1].Sidecar.Socket != "/var/run/kubevirt-plugin/test-plugin/ep-b/domain.sock" {
-		t.Fatalf("expected ep-b socket path, got %q", cr.Spec.DomainHooks[1].Sidecar.Socket)
+	if cr.Spec.DomainHooks[1].Sidecar.SocketPath != "/var/run/kubevirt-plugin/test-plugin/ep-b/domain.sock" {
+		t.Fatalf("expected ep-b socket path, got %q", cr.Spec.DomainHooks[1].Sidecar.SocketPath)
 	}
 }
 
@@ -1130,12 +1125,8 @@ func TestGenerateCollapsedDomainHooksSameEntrypoint(t *testing.T) {
 		t.Fatalf("expected domain hooks with same entrypoint to be collapsed into 1 CR entry, got %d", len(cr.Spec.DomainHooks))
 	}
 
-	if cr.Spec.DomainHooks[0].Type != "Sidecar" {
-		t.Fatalf("expected type Sidecar, got %q", cr.Spec.DomainHooks[0].Type)
-	}
-
-	if cr.Spec.DomainHooks[0].Sidecar.Socket != "/var/run/kubevirt-plugin/test-plugin/domain.sock" {
-		t.Fatalf("expected default socket path, got %q", cr.Spec.DomainHooks[0].Sidecar.Socket)
+	if cr.Spec.DomainHooks[0].Sidecar.SocketPath != "/var/run/kubevirt-plugin/test-plugin/domain.sock" {
+		t.Fatalf("expected default socket path, got %q", cr.Spec.DomainHooks[0].Sidecar.SocketPath)
 	}
 }
 
