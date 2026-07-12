@@ -23,9 +23,12 @@ type testPluginCR struct {
 		Condition       string `yaml:"condition,omitempty"`
 		FailureStrategy string `yaml:"failureStrategy,omitempty"`
 		DomainHooks     []struct {
-			Sidecar struct {
+			CEL *struct {
+				Expression string `yaml:"expression"`
+			} `yaml:"cel,omitempty"`
+			Sidecar *struct {
 				SocketPath string `yaml:"socketPath"`
-			} `yaml:"sidecar"`
+			} `yaml:"sidecar,omitempty"`
 			Condition       string `yaml:"condition,omitempty"`
 			FailureStrategy string `yaml:"failureStrategy,omitempty"`
 			Timeout         string `yaml:"timeout,omitempty"`
@@ -1146,5 +1149,259 @@ func TestGenerateNodeSocketPathSubdirectory(t *testing.T) {
 	expected := "/var/run/kubevirt/plugins/test-plugin/ep-a/node.sock"
 	if cr.Spec.NodeHooks[0].Socket != expected {
 		t.Fatalf("expected socket path %q, got %q", expected, cr.Spec.NodeHooks[0].Socket)
+	}
+}
+
+func TestGeneratePluginCRCELDomainHookOnly(t *testing.T) {
+	sourceDir := setupSourceDir(t)
+	outputDir := filepath.Join(t.TempDir(), "deploy")
+
+	p := New("test-plugin").WithDomainCELHook("domain.name == 'test'")
+	if err := p.generate(outputDir, sourceDir); err != nil {
+		t.Fatal(err)
+	}
+
+	var cr testPluginCR
+	readAndUnmarshal(t, findGeneratedFile(t, outputDir, "plugin.yaml"), &cr)
+
+	if len(cr.Spec.DomainHooks) != 1 {
+		t.Fatalf("expected 1 domainHook, got %d", len(cr.Spec.DomainHooks))
+	}
+
+	if cr.Spec.DomainHooks[0].CEL == nil {
+		t.Fatal("expected CEL domain hook")
+	}
+
+	if cr.Spec.DomainHooks[0].CEL.Expression != "domain.name == 'test'" {
+		t.Fatalf("expected expression, got %q", cr.Spec.DomainHooks[0].CEL.Expression)
+	}
+
+	if cr.Spec.DomainHooks[0].Sidecar != nil {
+		t.Fatal("expected no sidecar")
+	}
+}
+
+func TestGenerateMultipleCELDomainHooks(t *testing.T) {
+	sourceDir := setupSourceDir(t)
+	outputDir := filepath.Join(t.TempDir(), "deploy")
+
+	p := New("test-plugin").
+		WithDomainCELHook("domain.name == 'a'").
+		WithDomainCELHook("domain.name == 'b'")
+	if err := p.generate(outputDir, sourceDir); err != nil {
+		t.Fatal(err)
+	}
+
+	var cr testPluginCR
+	readAndUnmarshal(t, findGeneratedFile(t, outputDir, "plugin.yaml"), &cr)
+
+	if len(cr.Spec.DomainHooks) != 2 {
+		t.Fatalf("expected 2 domainHooks, got %d", len(cr.Spec.DomainHooks))
+	}
+
+	if cr.Spec.DomainHooks[0].CEL == nil || cr.Spec.DomainHooks[0].CEL.Expression != "domain.name == 'a'" {
+		t.Fatalf("expected first CEL expression, got %+v", cr.Spec.DomainHooks[0])
+	}
+
+	if cr.Spec.DomainHooks[1].CEL == nil || cr.Spec.DomainHooks[1].CEL.Expression != "domain.name == 'b'" {
+		t.Fatalf("expected second CEL expression, got %+v", cr.Spec.DomainHooks[1])
+	}
+}
+
+func TestGenerateCELFirstSidecarSecondOrder(t *testing.T) {
+	sourceDir := setupSourceDir(t)
+	outputDir := filepath.Join(t.TempDir(), "deploy")
+
+	p := New("test-plugin").
+		WithDomainCELHook("domain.name == 'cel-first'").
+		WithDomainHook(ForLibvirt(&stubDomainHandler{}))
+	if err := p.generate(outputDir, sourceDir); err != nil {
+		t.Fatal(err)
+	}
+
+	var cr testPluginCR
+	readAndUnmarshal(t, findGeneratedFile(t, outputDir, "plugin.yaml"), &cr)
+
+	if len(cr.Spec.DomainHooks) != 2 {
+		t.Fatalf("expected 2 domainHooks, got %d", len(cr.Spec.DomainHooks))
+	}
+
+	// CEL should be first (declaration order)
+	if cr.Spec.DomainHooks[0].CEL == nil {
+		t.Fatal("expected first hook to be CEL (declaration order)")
+	}
+
+	// Sidecar should be second
+	if cr.Spec.DomainHooks[1].Sidecar == nil {
+		t.Fatal("expected second hook to be sidecar (declaration order)")
+	}
+}
+
+func TestGenerateCELDomainHookWithNodeHook(t *testing.T) {
+	sourceDir := setupSourceDir(t)
+	outputDir := filepath.Join(t.TempDir(), "deploy")
+
+	p := New("test-plugin").
+		WithDomainCELHook("domain.name == 'test'").
+		WithNodeHook(PreVMStart, NodeHandler(&stubNodeHandler{}))
+	if err := p.generate(outputDir, sourceDir); err != nil {
+		t.Fatal(err)
+	}
+
+	var cr testPluginCR
+	readAndUnmarshal(t, findGeneratedFile(t, outputDir, "plugin.yaml"), &cr)
+
+	if len(cr.Spec.DomainHooks) != 1 {
+		t.Fatalf("expected 1 domainHook, got %d", len(cr.Spec.DomainHooks))
+	}
+
+	if cr.Spec.DomainHooks[0].CEL == nil {
+		t.Fatal("expected CEL domain hook")
+	}
+
+	if len(cr.Spec.NodeHooks) != 1 {
+		t.Fatalf("expected 1 nodeHook, got %d", len(cr.Spec.NodeHooks))
+	}
+
+	// DaemonSet should be generated (for node hook)
+	findGeneratedFile(t, outputDir, "daemonset.yaml")
+
+	// MAP should NOT be generated (no sidecar domain hooks)
+	if generatedFileExists(outputDir, "mutating-admission-policy.yaml") {
+		t.Fatal("expected no MAP for CEL-only domain hooks")
+	}
+
+	// Dockerfile should be generated (node hook needs container)
+	if _, err := os.Stat(filepath.Join(sourceDir, "Dockerfile")); os.IsNotExist(err) {
+		t.Fatal("expected Dockerfile for node hook plugin")
+	}
+}
+
+func TestGenerateCELOnlyNoDockerfile(t *testing.T) {
+	sourceDir := setupSourceDir(t)
+	outputDir := filepath.Join(t.TempDir(), "deploy")
+
+	p := New("test-plugin").WithDomainCELHook("domain.name == 'test'")
+	if err := p.generate(outputDir, sourceDir); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := os.Stat(filepath.Join(sourceDir, "Dockerfile")); !os.IsNotExist(err) {
+		t.Fatal("CEL-only plugin should not generate Dockerfile")
+	}
+
+	if _, err := os.Stat(filepath.Join(sourceDir, "Makefile")); !os.IsNotExist(err) {
+		t.Fatal("CEL-only plugin should not generate Makefile")
+	}
+}
+
+func TestGenerateCELOnlyNoMAP(t *testing.T) {
+	sourceDir := setupSourceDir(t)
+	outputDir := filepath.Join(t.TempDir(), "deploy")
+
+	p := New("test-plugin").WithDomainCELHook("domain.name == 'test'")
+	if err := p.generate(outputDir, sourceDir); err != nil {
+		t.Fatal(err)
+	}
+
+	if generatedFileExists(outputDir, "mutating-admission-policy.yaml") {
+		t.Fatal("CEL-only plugin should not generate MAP")
+	}
+
+	if generatedFileExists(outputDir, "mutating-admission-policy-binding.yaml") {
+		t.Fatal("CEL-only plugin should not generate MAP binding")
+	}
+}
+
+func TestGenerateMixedSidecarAndCEL(t *testing.T) {
+	sourceDir := setupSourceDir(t)
+	outputDir := filepath.Join(t.TempDir(), "deploy")
+
+	p := New("test-plugin").
+		WithDomainHook(ForLibvirt(&stubDomainHandler{})).
+		WithDomainCELHook("domain.name == 'mutated'")
+	if err := p.generate(outputDir, sourceDir); err != nil {
+		t.Fatal(err)
+	}
+
+	var cr testPluginCR
+	readAndUnmarshal(t, findGeneratedFile(t, outputDir, "plugin.yaml"), &cr)
+
+	if len(cr.Spec.DomainHooks) != 2 {
+		t.Fatalf("expected 2 domainHooks, got %d", len(cr.Spec.DomainHooks))
+	}
+
+	if cr.Spec.DomainHooks[0].Sidecar == nil {
+		t.Fatal("expected first hook to be sidecar")
+	}
+
+	if cr.Spec.DomainHooks[1].CEL == nil {
+		t.Fatal("expected second hook to be CEL")
+	}
+
+	if cr.Spec.DomainHooks[1].CEL.Expression != "domain.name == 'mutated'" {
+		t.Fatalf("expected CEL expression, got %q", cr.Spec.DomainHooks[1].CEL.Expression)
+	}
+
+	// MAP should still be generated for the sidecar hook
+	findGeneratedFile(t, outputDir, "mutating-admission-policy.yaml")
+}
+
+func TestGenerateCELWithPerHookSettings(t *testing.T) {
+	sourceDir := setupSourceDir(t)
+	outputDir := filepath.Join(t.TempDir(), "deploy")
+
+	timeout := 30 * time.Second
+	p := New("test-plugin").WithDomainHook(
+		CELDomainHook("domain.name == 'test'").
+			WithCondition("vmi.metadata.name == 'my-vmi'").
+			WithFailureStrategy(Ignore).
+			WithTimeout(timeout),
+	)
+	if err := p.generate(outputDir, sourceDir); err != nil {
+		t.Fatal(err)
+	}
+
+	var cr testPluginCR
+	readAndUnmarshal(t, findGeneratedFile(t, outputDir, "plugin.yaml"), &cr)
+
+	if len(cr.Spec.DomainHooks) != 1 {
+		t.Fatalf("expected 1 domainHook, got %d", len(cr.Spec.DomainHooks))
+	}
+
+	hook := cr.Spec.DomainHooks[0]
+
+	if hook.Condition != "vmi.metadata.name == 'my-vmi'" {
+		t.Fatalf("expected condition, got %q", hook.Condition)
+	}
+
+	if hook.FailureStrategy != "Ignore" {
+		t.Fatalf("expected failureStrategy Ignore, got %q", hook.FailureStrategy)
+	}
+
+	if hook.Timeout != "30s" {
+		t.Fatalf("expected timeout 30s, got %q", hook.Timeout)
+	}
+}
+
+func TestGenerateCELExpressionWithDoubleQuotes(t *testing.T) {
+	sourceDir := setupSourceDir(t)
+	outputDir := filepath.Join(t.TempDir(), "deploy")
+
+	expr := `domain.metadata.annotations["key"] == "value"`
+	p := New("test-plugin").WithDomainCELHook(expr)
+	if err := p.generate(outputDir, sourceDir); err != nil {
+		t.Fatal(err)
+	}
+
+	content := readFileContent(t, findGeneratedFile(t, outputDir, "plugin.yaml"))
+
+	var cr testPluginCR
+	if err := yaml.Unmarshal([]byte(content), &cr); err != nil {
+		t.Fatalf("generated YAML with double-quoted expression is invalid: %v\nContent:\n%s", err, content)
+	}
+
+	if cr.Spec.DomainHooks[0].CEL.Expression != expr {
+		t.Fatalf("expected expression to round-trip, got %q", cr.Spec.DomainHooks[0].CEL.Expression)
 	}
 }

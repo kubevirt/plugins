@@ -475,3 +475,101 @@ func TestWithValidCELConditionSucceeds(t *testing.T) {
 		t.Fatalf("expected plugin condition to be set, got %q", p.condition)
 	}
 }
+
+func TestCELDomainHookCreation(t *testing.T) {
+	opt := CELDomainHook("domain.name == 'test'")
+
+	if !opt.isCEL() {
+		t.Fatal("expected isCEL to be true")
+	}
+
+	if opt.expression != "domain.name == 'test'" {
+		t.Fatalf("expected expression, got %q", opt.expression)
+	}
+}
+
+func TestCELDomainHookEmptyExpressionPanics(t *testing.T) {
+	defer func() {
+		if r := recover(); r == nil {
+			t.Fatal("expected panic on empty CEL expression")
+		}
+	}()
+
+	CELDomainHook("")
+}
+
+func TestCELDomainHookInvalidExpressionPanics(t *testing.T) {
+	defer func() {
+		if r := recover(); r == nil {
+			t.Fatal("expected panic on invalid CEL expression")
+		}
+	}()
+
+	CELDomainHook("invalid >>><< expression")
+}
+
+func TestCELDomainHookWithPerHookSettings(t *testing.T) {
+	timeout := 30 * time.Second
+	opt := CELDomainHook("domain.name == 'test'").
+		WithCondition("vmi.metadata.name == 'my-vmi'").
+		WithFailureStrategy(Ignore).
+		WithTimeout(timeout)
+
+	if opt.condition != "vmi.metadata.name == 'my-vmi'" {
+		t.Fatalf("expected condition, got %q", opt.condition)
+	}
+
+	if opt.failureStrategy == nil || *opt.failureStrategy != Ignore {
+		t.Fatal("expected failure strategy Ignore")
+	}
+
+	if opt.timeout == nil || *opt.timeout != timeout {
+		t.Fatal("expected timeout 30s")
+	}
+}
+
+func TestCELDomainHookWithEntrypointPanics(t *testing.T) {
+	defer func() {
+		if r := recover(); r == nil {
+			t.Fatal("expected panic on CEL hook with entrypoint")
+		}
+	}()
+
+	CELDomainHook("domain.name == 'test'").WithEntrypoint("my-ep")
+}
+
+func TestWithDomainCELHookConvenience(t *testing.T) {
+	p := New("test").WithDomainCELHook("domain.name == 'test'")
+
+	if len(p.domainHooks) != 1 {
+		t.Fatalf("expected 1 domain hook, got %d", len(p.domainHooks))
+	}
+
+	if !p.domainHooks[0].isCEL() {
+		t.Fatal("expected CEL domain hook")
+	}
+}
+
+func TestMixedSidecarAndCELDomainHooks(t *testing.T) {
+	handler := &stubDomainHandler{}
+	p := New("test").
+		WithDomainHook(ForLibvirt(handler)).
+		WithDomainCELHook("domain.name == 'test'").
+		WithDomainHook(ForLibvirt(handler))
+
+	if len(p.domainHooks) != 3 {
+		t.Fatalf("expected 3 domain hooks, got %d", len(p.domainHooks))
+	}
+
+	if p.domainHooks[0].isCEL() {
+		t.Fatal("expected first hook to be sidecar")
+	}
+
+	if !p.domainHooks[1].isCEL() {
+		t.Fatal("expected second hook to be CEL")
+	}
+
+	if p.domainHooks[2].isCEL() {
+		t.Fatal("expected third hook to be sidecar")
+	}
+}
