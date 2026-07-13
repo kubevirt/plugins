@@ -16,6 +16,8 @@ type Plugin struct {
 	failureStrategy FailureStrategy
 	namespace       string
 	rbacRules       []rbacv1.PolicyRule
+	image           string
+	imagePullPolicy string
 }
 
 type DomainHookOption struct {
@@ -102,6 +104,22 @@ func (p *Plugin) WithNamespace(namespace string) *Plugin {
 		panic("namespace must not be empty")
 	}
 	p.namespace = namespace
+	return p
+}
+
+func (p *Plugin) WithImage(image string) *Plugin {
+	if image == "" {
+		panic("image must not be empty")
+	}
+	p.image = image
+	return p
+}
+
+func (p *Plugin) WithImagePullPolicy(policy string) *Plugin {
+	if policy == "" {
+		panic("image pull policy must not be empty")
+	}
+	p.imagePullPolicy = policy
 	return p
 }
 
@@ -210,4 +228,11 @@ func (p *Plugin) resolveEntrypoint(entrypoint string) string {
 		return p.name
 	}
 	return entrypoint
+}
+
+func (p *Plugin) resolveImage() string {
+	if p.image != "" {
+		return p.image
+	}
+	return "quay.io/myorg/" + p.name + ":latest"
 }

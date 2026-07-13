@@ -36,6 +36,13 @@ type nodeHookTmplData struct {
 	Timeout         string
 }
 
+type hookSidecar struct {
+	Image           string   `json:"image"`
+	ImagePullPolicy string   `json:"imagePullPolicy,omitempty"`
+	Command         []string `json:"command,omitempty"`
+	Args            []string `json:"args,omitempty"`
+}
+
 const pluginCRTmplStr = `apiVersion: plugin.kubevirt.io/v1alpha1
 kind: Plugin
 metadata:
@@ -106,7 +113,10 @@ spec:
 {{- end }}
       containers:
       - name: {{ .Name }}
-        image: quay.io/myorg/{{ .PluginName }}:latest
+        image: {{ .Image }}
+{{- if .ImagePullPolicy }}
+        imagePullPolicy: {{ .ImagePullPolicy }}
+{{- end }}
 {{- if .Args }}
         args:
 {{- range .Args }}
@@ -174,6 +184,17 @@ spec:
     apiVersion: plugin.kubevirt.io/v1alpha1
     kind: Plugin
   reinvocationPolicy: IfNeeded
+  mutations:
+  - patchType: ApplyConfiguration
+    applyConfiguration:
+      expression: |-
+        Object{
+          metadata: Object.metadata{
+            annotations: {
+              "hooks.kubevirt.io/hookSidecars": {{ .SidecarCEL }}
+            }
+          }
+        }
 `
 
 const mapBindingTmplStr = `apiVersion: admissionregistration.k8s.io/v1alpha1
@@ -213,6 +234,12 @@ push: build
 	$(CONTAINER_ENGINE) push $(IMAGE)
 `
 
+func celStringLiteral(s string) string {
+	s = strings.ReplaceAll(s, `\`, `\\`)
+	s = strings.ReplaceAll(s, `"`, `\"`)
+	return `"` + s + `"`
+}
+
 func (p *Plugin) WithRBACRules(rules []rbacv1.PolicyRule) *Plugin {
 	p.rbacRules = rules
 	return p
@@ -237,7 +264,6 @@ func (p *Plugin) generate(outputDir, sourceDir string) error {
 	}
 
 	nodeEntrypoints := p.uniqueNodeEntrypoints()
-	domainEntrypoints := p.uniqueDomainEntrypoints()
 
 	type artifact struct {
 		suffix  string
@@ -274,26 +300,17 @@ func (p *Plugin) generate(outputDir, sourceDir string) error {
 	yamlFiles = append(yamlFiles, artifact{"plugin.yaml", content})
 
 	if hasSidecarDomain {
-		for _, entrypoint := range domainEntrypoints {
-			suffix := "mutating-admission-policy.yaml"
-			bindingSuffix := "mutating-admission-policy-binding.yaml"
-			if entrypoint != p.name {
-				suffix = entrypoint + "-mutating-admission-policy.yaml"
-				bindingSuffix = entrypoint + "-mutating-admission-policy-binding.yaml"
-			}
-
-			content, err := p.renderMAP(entrypoint)
-			if err != nil {
-				return err
-			}
-			yamlFiles = append(yamlFiles, artifact{suffix, content})
-
-			content, err = p.renderMAPBinding(entrypoint)
-			if err != nil {
-				return err
-			}
-			yamlFiles = append(yamlFiles, artifact{bindingSuffix, content})
+		content, err := p.renderMAP()
+		if err != nil {
+			return err
 		}
+		yamlFiles = append(yamlFiles, artifact{"mutating-admission-policy.yaml", content})
+
+		content, err = p.renderMAPBinding()
+		if err != nil {
+			return err
+		}
+		yamlFiles = append(yamlFiles, artifact{"mutating-admission-policy-binding.yaml", content})
 	}
 
 	for i, file := range yamlFiles {
@@ -412,15 +429,19 @@ func (p *Plugin) renderDaemonSet(entrypoint string) (string, error) {
 		name = p.name + "-" + entrypoint
 	}
 
+	image := p.resolveImage()
+
 	data := struct {
 		Name               string
-		PluginName         string
+		Image              string
+		ImagePullPolicy    string
 		ServiceAccountName string
 		Args               []string
 	}{
-		Name:       name,
-		PluginName: p.name,
+		Name:  name,
+		Image: image,
 	}
+	data.ImagePullPolicy = p.imagePullPolicy
 
 	if len(p.rbacRules) > 0 {
 		data.ServiceAccountName = p.name
@@ -449,27 +470,43 @@ func (p *Plugin) renderRBAC() (string, error) {
 	return renderTemplate(rbacTmplStr, data)
 }
 
-func (p *Plugin) renderMAP(entrypoint string) (string, error) {
-	name := p.name
-	if entrypoint != p.name {
-		name = p.name + "-" + entrypoint
+func (p *Plugin) renderMAP() (string, error) {
+	var sidecars []hookSidecar
+	for _, entrypoint := range p.uniqueDomainEntrypoints() {
+		sidecar := hookSidecar{Image: p.resolveImage()}
+		if p.imagePullPolicy != "" {
+			sidecar.ImagePullPolicy = p.imagePullPolicy
+		}
+		if entrypoint != p.name {
+			sidecar.Args = []string{"--entrypoint", entrypoint}
+		}
+		sidecars = append(sidecars, sidecar)
 	}
-	return renderTemplate(mapTmplStr, struct{ Name string }{name})
+
+	sidecarJSON, err := json.Marshal(sidecars)
+	if err != nil {
+		return "", fmt.Errorf("marshal sidecar config: %w", err)
+	}
+
+	data := struct {
+		Name       string
+		SidecarCEL string
+	}{
+		Name:       p.name,
+		SidecarCEL: celStringLiteral(string(sidecarJSON)),
+	}
+
+	return renderTemplate(mapTmplStr, data)
 }
 
-func (p *Plugin) renderMAPBinding(entrypoint string) (string, error) {
-	name := p.name
-	if entrypoint != p.name {
-		name = p.name + "-" + entrypoint
-	}
-
+func (p *Plugin) renderMAPBinding() (string, error) {
 	data := struct {
 		Name         string
 		PolicyName   string
 		ParamRefName string
 	}{
-		Name:         name,
-		PolicyName:   name,
+		Name:         p.name,
+		PolicyName:   p.name,
 		ParamRefName: p.name,
 	}
 

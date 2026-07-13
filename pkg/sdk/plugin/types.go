@@ -3,7 +3,6 @@ package plugin
 import (
 	"path/filepath"
 
-	corev1 "k8s.io/api/core/v1"
 	v1 "kubevirt.io/api/core/v1"
 )
 
@@ -25,16 +24,9 @@ const (
 	Ignore FailureStrategy = "Ignore"
 )
 
-// SidecarConfig defines the container and volumes injected alongside virt-launcher for a domain hook.
-// It will be used when MutatingAdmissionPolicy-based sidecar generation is fully implemented.
-type SidecarConfig struct {
-	// Container is the sidecar container spec injected into the virt-launcher pod.
-	Container corev1.Container
-	// Volumes are additional volumes mounted into the virt-launcher pod.
-	Volumes []corev1.Volume
-}
-
 const (
+	// HookSidecarAnnotationName is the VMI annotation key for sidecar injection. Also used in the MAP template (generate.go).
+	HookSidecarAnnotationName = "hooks.kubevirt.io/hookSidecars"
 	// DomainSocketBasePath is the base directory for domain hook sockets.
 	DomainSocketBasePath = "/var/run/kubevirt-plugin"
 	// NodeSocketBasePath is the base directory for node hook sockets.
