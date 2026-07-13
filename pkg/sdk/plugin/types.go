@@ -5,23 +5,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	v1 "kubevirt.io/api/core/v1"
-	"libvirt.org/go/libvirtxml"
 )
-
-// DomainHookRequest contains the inputs passed to a domain hook handler.
-// While the handler interface accepts individual fields, InvocationContext is
-// made available via Go context values. Use InvocationContextFromContext(ctx)
-// to retrieve it from the handler's context parameter.
-type DomainHookRequest struct {
-	// Domain is the libvirt domain XML being mutated.
-	Domain *libvirtxml.Domain
-	// VMI is the VirtualMachineInstance that owns this domain.
-	VMI *v1.VirtualMachineInstance
-	// DomainType identifies the hypervisor backend (e.g. "libvirt").
-	DomainType string
-	// InvocationContext indicates when the hook is invoked (e.g. "onDefineDomain").
-	InvocationContext string
-}
 
 // NodeHookRequest contains the inputs passed to a node hook handler.
 type NodeHookRequest struct {
