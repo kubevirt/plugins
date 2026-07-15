@@ -35,11 +35,11 @@ type testPluginCR struct {
 			Timeout         string `yaml:"timeout,omitempty"`
 		} `yaml:"domainHooks,omitempty"`
 		NodeHooks []struct {
-			HookPoint       string `yaml:"hookPoint"`
-			Socket          string `yaml:"socket"`
-			Condition       string `yaml:"condition,omitempty"`
-			FailureStrategy string `yaml:"failureStrategy,omitempty"`
-			Timeout         string `yaml:"timeout,omitempty"`
+			PermittedHooks  []string `yaml:"permittedHooks"`
+			Socket          string   `yaml:"socket"`
+			Condition       string   `yaml:"condition,omitempty"`
+			FailureStrategy string   `yaml:"failureStrategy,omitempty"`
+			Timeout         string   `yaml:"timeout,omitempty"`
 		} `yaml:"nodeHooks,omitempty"`
 	} `yaml:"spec"`
 }
@@ -291,8 +291,8 @@ func TestGeneratePluginCRNodeHookOnly(t *testing.T) {
 		t.Fatalf("expected 1 nodeHook, got %d", len(cr.Spec.NodeHooks))
 	}
 
-	if cr.Spec.NodeHooks[0].HookPoint != PreVMStart {
-		t.Fatalf("expected hookPoint %q, got %q", PreVMStart, cr.Spec.NodeHooks[0].HookPoint)
+	if len(cr.Spec.NodeHooks[0].PermittedHooks) != 1 || cr.Spec.NodeHooks[0].PermittedHooks[0] != PreVMStart {
+		t.Fatalf("expected permittedHooks [%q], got %v", PreVMStart, cr.Spec.NodeHooks[0].PermittedHooks)
 	}
 
 	if cr.Spec.NodeHooks[0].Socket != "/var/run/kubevirt/plugins/test-plugin/node.sock" {
@@ -301,6 +301,37 @@ func TestGeneratePluginCRNodeHookOnly(t *testing.T) {
 
 	if len(cr.Spec.DomainHooks) != 0 {
 		t.Fatal("expected no domainHooks")
+	}
+}
+
+func TestGenerateNodeHookMultipleHookPointsSameEntrypoint(t *testing.T) {
+	sourceDir := setupSourceDir(t)
+	outputDir := filepath.Join(t.TempDir(), "deploy")
+
+	p := New("test-plugin").
+		WithNodeHook(PreVMStart, NodeHandler(&stubNodeHandler{})).
+		WithNodeHook(PostVMStop, NodeHandler(&stubNodeHandler{}))
+	if err := p.generate(outputDir, sourceDir); err != nil {
+		t.Fatal(err)
+	}
+
+	var cr testPluginCR
+	readAndUnmarshal(t, findGeneratedFile(t, outputDir, "plugin.yaml"), &cr)
+
+	if len(cr.Spec.NodeHooks) != 1 {
+		t.Fatalf("expected 1 nodeHook entry (grouped), got %d", len(cr.Spec.NodeHooks))
+	}
+
+	if len(cr.Spec.NodeHooks[0].PermittedHooks) != 2 {
+		t.Fatalf("expected 2 permittedHooks, got %d", len(cr.Spec.NodeHooks[0].PermittedHooks))
+	}
+
+	if cr.Spec.NodeHooks[0].PermittedHooks[0] != PreVMStart {
+		t.Fatalf("expected first hook point %q, got %q", PreVMStart, cr.Spec.NodeHooks[0].PermittedHooks[0])
+	}
+
+	if cr.Spec.NodeHooks[0].PermittedHooks[1] != PostVMStop {
+		t.Fatalf("expected second hook point %q, got %q", PostVMStop, cr.Spec.NodeHooks[0].PermittedHooks[1])
 	}
 }
 
@@ -634,8 +665,8 @@ func TestGenerateMAP(t *testing.T) {
 	var m testMAP
 	readAndUnmarshal(t, findGeneratedFile(t, outputDir, "mutating-admission-policy.yaml"), &m)
 
-	if m.APIVersion != "admissionregistration.k8s.io/v1alpha1" {
-		t.Fatalf("expected apiVersion admissionregistration.k8s.io/v1alpha1, got %q", m.APIVersion)
+	if m.APIVersion != "admissionregistration.k8s.io/v1" {
+		t.Fatalf("expected apiVersion admissionregistration.k8s.io/v1, got %q", m.APIVersion)
 	}
 
 	if m.Kind != "MutatingAdmissionPolicy" {
@@ -693,7 +724,7 @@ func TestGenerateDockerfile(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	content := readFileContent(t, filepath.Join(sourceDir, "Dockerfile"))
+	content := readFileContent(t, filepath.Join(outputDir, "Dockerfile"))
 
 	if !strings.Contains(content, "FROM golang:1.23.0 AS builder") {
 		t.Fatalf("expected Dockerfile to contain Go version 1.23.0, got:\n%s", content)
@@ -713,7 +744,7 @@ func TestGenerateMakefile(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	content := readFileContent(t, filepath.Join(sourceDir, "Makefile"))
+	content := readFileContent(t, filepath.Join(outputDir, "Makefile"))
 
 	if !strings.Contains(content, "test-plugin") {
 		t.Fatalf("expected Makefile to contain plugin name, got:\n%s", content)
@@ -769,28 +800,24 @@ func TestGenerateFileNumbering(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	expectedYAML := []string{
+	expectedFiles := []string{
 		"01-rbac.yaml",
 		"02-daemonset.yaml",
 		"03-plugin.yaml",
 		"04-mutating-admission-policy.yaml",
 		"05-mutating-admission-policy-binding.yaml",
+		"Dockerfile",
+		"Makefile",
 	}
 
 	files := listFileNames(outputDir)
-	if len(files) != len(expectedYAML) {
-		t.Fatalf("expected %d YAML files in output dir, got %d: %v", len(expectedYAML), len(files), files)
+	if len(files) != len(expectedFiles) {
+		t.Fatalf("expected %d files in output dir, got %d: %v", len(expectedFiles), len(files), files)
 	}
 
-	for i, name := range expectedYAML {
+	for i, name := range expectedFiles {
 		if files[i] != name {
 			t.Fatalf("file %d: expected %q, got %q (all files: %v)", i, name, files[i], files)
-		}
-	}
-
-	for _, name := range []string{"Dockerfile", "Makefile"} {
-		if _, err := os.Stat(filepath.Join(sourceDir, name)); os.IsNotExist(err) {
-			t.Fatalf("expected %s in source dir %s", name, sourceDir)
 		}
 	}
 }
@@ -1125,6 +1152,63 @@ func TestGenerateConflictingDomainHooksSameEntrypoint(t *testing.T) {
 	})
 }
 
+func TestGenerateConflictingNodeHooksSameEntrypoint(t *testing.T) {
+	sourceDir := setupSourceDir(t)
+	outputDir := filepath.Join(t.TempDir(), "deploy")
+
+	t.Run("conflicting conditions", func(t *testing.T) {
+		p := New("test-plugin").
+			WithNodeHook(PreVMStart, NodeHandler(&stubNodeHandler{}).WithCondition("vmi.metadata.name == 'a'")).
+			WithNodeHook(PostVMStop, NodeHandler(&stubNodeHandler{}).WithCondition("vmi.metadata.name == 'b'"))
+		err := p.generate(outputDir, sourceDir)
+		if err == nil {
+			t.Fatal("expected error for conflicting conditions")
+		}
+		if !strings.Contains(err.Error(), "conflicting conditions") {
+			t.Fatalf("expected conflicting conditions error, got: %v", err)
+		}
+	})
+
+	t.Run("conflicting timeouts", func(t *testing.T) {
+		p := New("test-plugin").
+			WithNodeHook(PreVMStart, NodeHandler(&stubNodeHandler{}).WithTimeout(10 * time.Second)).
+			WithNodeHook(PostVMStop, NodeHandler(&stubNodeHandler{}).WithTimeout(30 * time.Second))
+		err := p.generate(outputDir, sourceDir)
+		if err == nil {
+			t.Fatal("expected error for conflicting timeouts")
+		}
+		if !strings.Contains(err.Error(), "conflicting timeouts") {
+			t.Fatalf("expected conflicting timeouts error, got: %v", err)
+		}
+	})
+
+	t.Run("conflicting failure strategies", func(t *testing.T) {
+		p := New("test-plugin").
+			WithNodeHook(PreVMStart, NodeHandler(&stubNodeHandler{}).WithFailureStrategy(Fail)).
+			WithNodeHook(PostVMStop, NodeHandler(&stubNodeHandler{}).WithFailureStrategy(Ignore))
+		err := p.generate(outputDir, sourceDir)
+		if err == nil {
+			t.Fatal("expected error for conflicting failure strategies")
+		}
+		if !strings.Contains(err.Error(), "conflicting failure strategies") {
+			t.Fatalf("expected conflicting failure strategies error, got: %v", err)
+		}
+	})
+
+	t.Run("one set one unset timeout", func(t *testing.T) {
+		p := New("test-plugin").
+			WithNodeHook(PreVMStart, NodeHandler(&stubNodeHandler{}).WithTimeout(10 * time.Second)).
+			WithNodeHook(PostVMStop, NodeHandler(&stubNodeHandler{}))
+		err := p.generate(outputDir, sourceDir)
+		if err == nil {
+			t.Fatal("expected error when one hook has timeout and another does not")
+		}
+		if !strings.Contains(err.Error(), "conflicting timeouts") {
+			t.Fatalf("expected conflicting timeouts error, got: %v", err)
+		}
+	})
+}
+
 func TestGenerateCollapsedDomainHooksSameEntrypoint(t *testing.T) {
 	sourceDir := setupSourceDir(t)
 	outputDir := filepath.Join(t.TempDir(), "deploy")
@@ -1287,7 +1371,7 @@ func TestGenerateCELDomainHookWithNodeHook(t *testing.T) {
 	}
 
 	// Dockerfile should be generated (node hook needs container)
-	if _, err := os.Stat(filepath.Join(sourceDir, "Dockerfile")); os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(outputDir, "Dockerfile")); os.IsNotExist(err) {
 		t.Fatal("expected Dockerfile for node hook plugin")
 	}
 }
@@ -1301,11 +1385,11 @@ func TestGenerateCELOnlyNoDockerfile(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := os.Stat(filepath.Join(sourceDir, "Dockerfile")); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(outputDir, "Dockerfile")); !os.IsNotExist(err) {
 		t.Fatal("CEL-only plugin should not generate Dockerfile")
 	}
 
-	if _, err := os.Stat(filepath.Join(sourceDir, "Makefile")); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(outputDir, "Makefile")); !os.IsNotExist(err) {
 		t.Fatal("CEL-only plugin should not generate Makefile")
 	}
 }
