@@ -744,3 +744,59 @@ func TestServeNonExistentEntrypointErrors(t *testing.T) {
 		t.Fatalf("expected 'no hooks registered for entrypoint' error, got: %v", err)
 	}
 }
+
+func TestServeCELOnlyPluginErrors(t *testing.T) {
+	p := New("test-plugin").WithDomainCELHook("domain.name == 'test'")
+
+	err := p.Serve()
+	if err == nil {
+		t.Fatal("expected error when serving CEL-only plugin")
+	}
+
+	if !strings.Contains(err.Error(), "CEL domain hooks") {
+		t.Fatalf("expected CEL-specific error message, got: %v", err)
+	}
+}
+
+func TestServeMixedSidecarAndCEL(t *testing.T) {
+	tmpDir := t.TempDir()
+	domainSock := filepath.Join(tmpDir, "domain.sock")
+
+	handler := &mutatingDomainHandler{}
+	p := New("test-plugin").
+		WithDomainHook(ForLibvirt(handler)).
+		WithDomainCELHook("domain.name == 'test'")
+
+	stopCh := make(chan struct{})
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- p.Serve(withDomainSocketPath(domainSock), withStopCh(stopCh))
+	}()
+
+	waitForSocket(t, domainSock)
+
+	conn := dialSocket(t, domainSock)
+	client := pb.NewDomainHookServiceClient(conn)
+
+	resp, err := client.MutateDomain(context.Background(), &pb.MutateDomainRequest{
+		DomainType:     "libvirt",
+		Domain:         testDomainXML(t, "original"),
+		Vmi:            mustMarshalVMI(t, testVMI("test")),
+		SidecarContext: &pb.SidecarContext{},
+	})
+	if err != nil {
+		t.Fatalf("MutateDomain RPC failed: %v", err)
+	}
+
+	var result libvirtxml.Domain
+	if err := result.Unmarshal(string(resp.Domain)); err != nil {
+		t.Fatalf("failed to unmarshal response: %v", err)
+	}
+
+	if result.Name != "mutated-original" {
+		t.Fatalf("expected domain name 'mutated-original', got %q", result.Name)
+	}
+
+	close(stopCh)
+	awaitServeStop(t, errCh)
+}

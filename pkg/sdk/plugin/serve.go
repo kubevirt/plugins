@@ -130,6 +130,9 @@ func (h *chainedDomainHandler) MutateDomain(ctx context.Context, domain *libvirt
 func (p *Plugin) domainHooksForEntrypoint(entrypoint string) []DomainHookOption {
 	var result []DomainHookOption
 	for _, domainHook := range p.domainHooks {
+		if domainHook.isCEL() {
+			continue
+		}
 		if p.resolveEntrypoint(domainHook.entrypoint) == entrypoint {
 			result = append(result, domainHook)
 		}
@@ -151,6 +154,9 @@ func (p *Plugin) allEntrypoints() []string {
 	seen := map[string]bool{}
 	var entrypoints []string
 	for _, domainHook := range p.domainHooks {
+		if domainHook.isCEL() {
+			continue
+		}
 		entrypoint := p.resolveEntrypoint(domainHook.entrypoint)
 		if !seen[entrypoint] {
 			seen[entrypoint] = true
@@ -186,6 +192,10 @@ func (p *Plugin) Serve(opts ...serveOption) error {
 	} else {
 		allEntrypoints := p.allEntrypoints()
 		if len(allEntrypoints) == 0 {
+			hasCELOnly := len(p.domainHooks) > 0 && len(p.sidecarDomainHooks()) == 0 && len(p.nodeHooks) == 0
+			if hasCELOnly {
+				return fmt.Errorf("plugin has only CEL domain hooks which are evaluated by kubevirt directly; Serve() is not needed")
+			}
 			return fmt.Errorf("no hooks registered")
 		}
 		if len(allEntrypoints) > 1 {

@@ -8,6 +8,14 @@ import (
 	v1 "kubevirt.io/api/core/v1"
 )
 
+func ValidateDomainCELExpression(expr string) error {
+	env, err := newDomainCELExprEnv()
+	if err != nil {
+		return fmt.Errorf("creating CEL environment: %w", err)
+	}
+	return validateExpr(env, expr)
+}
+
 func ValidateDomainHookCondition(expr string) error {
 	env, err := newDomainEnv()
 	if err != nil {
@@ -59,6 +67,14 @@ func EvaluateNodeHookCondition(expr string, vmi *v1.VirtualMachineInstance) (boo
 	return evaluate(env, expr, map[string]any{
 		"vmi": vmiMap,
 	})
+}
+
+func newDomainCELExprEnv() (*cel.Env, error) {
+	return cel.NewEnv(
+		cel.Variable("domain", cel.DynType),
+		cel.Variable("vmi", cel.DynType),
+		cel.Variable("domainSpec", cel.DynType),
+	)
 }
 
 func newDomainEnv() (*cel.Env, error) {

@@ -20,10 +20,15 @@ type Plugin struct {
 
 type DomainHookOption struct {
 	handler         LibvirtDomainHookHandler
+	expression      string
 	condition       string
 	failureStrategy *FailureStrategy
 	timeout         *time.Duration
 	entrypoint      string
+}
+
+func (o *DomainHookOption) isCEL() bool {
+	return o.expression != ""
 }
 
 type NodeHookOption struct {
@@ -44,6 +49,13 @@ func New(name string) *Plugin {
 }
 
 func (p *Plugin) WithDomainHook(opt *DomainHookOption) *Plugin {
+	if opt.handler == nil && opt.expression == "" {
+		panic("domain hook must have either a handler or a CEL expression")
+	}
+	if opt.handler != nil && opt.expression != "" {
+		panic("domain hook must have either a handler or a CEL expression, not both")
+	}
+
 	p.domainHooks = append(p.domainHooks, *opt)
 	return p
 }
@@ -97,6 +109,20 @@ func ForLibvirt(handler LibvirtDomainHookHandler) *DomainHookOption {
 	return &DomainHookOption{handler: handler}
 }
 
+func CELDomainHook(expression string) *DomainHookOption {
+	if expression == "" {
+		panic("CEL domain hook expression must not be empty")
+	}
+	if err := cel.ValidateDomainCELExpression(expression); err != nil {
+		panic(fmt.Sprintf("invalid CEL domain hook expression: %v", err))
+	}
+	return &DomainHookOption{expression: expression}
+}
+
+func (p *Plugin) WithDomainCELHook(expression string) *Plugin {
+	return p.WithDomainHook(CELDomainHook(expression))
+}
+
 func (o *DomainHookOption) WithCondition(condition string) *DomainHookOption {
 	if err := cel.ValidateDomainHookCondition(condition); err != nil {
 		panic(fmt.Sprintf("invalid domain hook CEL condition: %v", err))
@@ -138,6 +164,9 @@ func (o *NodeHookOption) WithTimeout(timeout time.Duration) *NodeHookOption {
 }
 
 func (o *DomainHookOption) WithEntrypoint(name string) *DomainHookOption {
+	if o.isCEL() {
+		panic("CEL domain hooks do not support entrypoints")
+	}
 	validateEntrypoint(name)
 	o.entrypoint = name
 	return o

@@ -2,6 +2,7 @@ package plugin
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -20,8 +21,8 @@ type pluginCRData struct {
 }
 
 type domainHookTmplData struct {
-	Type            string
 	Socket          string
+	Expression      string
 	Condition       string
 	FailureStrategy string
 	Timeout         string
@@ -49,9 +50,13 @@ spec:
 {{- if .DomainHooks }}
   domainHooks:
 {{- range .DomainHooks }}
-  - type: {{ .Type }}
-    sidecar:
-      socket: {{ .Socket }}
+{{- if .Expression }}
+  - cel:
+      expression: {{ yamlStr .Expression }}
+{{- else }}
+  - sidecar:
+      socketPath: {{ .Socket }}
+{{- end }}
 {{- if .Condition }}
     condition: "{{ .Condition }}"
 {{- end }}
@@ -224,6 +229,8 @@ func (p *Plugin) generate(outputDir, sourceDir string) error {
 
 	hasNode := len(p.nodeHooks) > 0
 	hasDomain := len(p.domainHooks) > 0
+	sidecarDomainHooks := p.sidecarDomainHooks()
+	hasSidecarDomain := len(sidecarDomainHooks) > 0
 
 	if !hasNode && !hasDomain {
 		return fmt.Errorf("no hooks registered; nothing to generate")
@@ -266,7 +273,7 @@ func (p *Plugin) generate(outputDir, sourceDir string) error {
 	}
 	yamlFiles = append(yamlFiles, artifact{"plugin.yaml", content})
 
-	if hasDomain {
+	if hasSidecarDomain {
 		for _, entrypoint := range domainEntrypoints {
 			suffix := "mutating-admission-policy.yaml"
 			bindingSuffix := "mutating-admission-policy-binding.yaml"
@@ -296,24 +303,27 @@ func (p *Plugin) generate(outputDir, sourceDir string) error {
 		}
 	}
 
-	goVersion, err := readGoVersion(sourceDir)
-	if err != nil {
-		return err
-	}
-	dockerfileContent, err := renderTemplate(dockerfileTmplStr, struct{ GoVersion string }{goVersion})
-	if err != nil {
-		return err
-	}
-	if err := os.WriteFile(filepath.Join(sourceDir, "Dockerfile"), []byte(dockerfileContent), 0644); err != nil {
-		return fmt.Errorf("write Dockerfile: %w", err)
-	}
+	hasServableHooks := hasSidecarDomain || hasNode
+	if hasServableHooks {
+		goVersion, err := readGoVersion(sourceDir)
+		if err != nil {
+			return err
+		}
+		dockerfileContent, err := renderTemplate(dockerfileTmplStr, struct{ GoVersion string }{goVersion})
+		if err != nil {
+			return err
+		}
+		if err := os.WriteFile(filepath.Join(sourceDir, "Dockerfile"), []byte(dockerfileContent), 0644); err != nil {
+			return fmt.Errorf("write Dockerfile: %w", err)
+		}
 
-	makefileContent, err := renderTemplate(makefileTmplStr, struct{ Name string }{p.name})
-	if err != nil {
-		return err
-	}
-	if err := os.WriteFile(filepath.Join(sourceDir, "Makefile"), []byte(makefileContent), 0644); err != nil {
-		return fmt.Errorf("write Makefile: %w", err)
+		makefileContent, err := renderTemplate(makefileTmplStr, struct{ Name string }{p.name})
+		if err != nil {
+			return err
+		}
+		if err := os.WriteFile(filepath.Join(sourceDir, "Makefile"), []byte(makefileContent), 0644); err != nil {
+			return fmt.Errorf("write Makefile: %w", err)
+		}
 	}
 
 	return nil
@@ -329,28 +339,50 @@ func (p *Plugin) renderPluginCR() (string, error) {
 		data.FailureStrategy = string(p.failureStrategy)
 	}
 
-	for _, entrypoint := range p.uniqueDomainEntrypoints() {
-		hooks := p.domainHooksForEntrypoint(entrypoint)
-		if err := validateDomainHookConsistency(entrypoint, hooks); err != nil {
-			return "", err
-		}
-		first := hooks[0]
+	// Process domain hooks in declaration order, preserving interleaving
+	renderedSidecarEntrypoints := map[string]bool{}
+	for _, hook := range p.domainHooks {
+		if hook.isCEL() {
+			hookData := domainHookTmplData{
+				Expression: hook.expression,
+			}
+			if hook.condition != "" {
+				hookData.Condition = hook.condition
+			}
+			if hook.failureStrategy != nil {
+				hookData.FailureStrategy = string(*hook.failureStrategy)
+			}
+			if hook.timeout != nil {
+				hookData.Timeout = hook.timeout.String()
+			}
+			data.DomainHooks = append(data.DomainHooks, hookData)
+		} else {
+			entrypoint := p.resolveEntrypoint(hook.entrypoint)
+			if renderedSidecarEntrypoints[entrypoint] {
+				continue
+			}
+			renderedSidecarEntrypoints[entrypoint] = true
 
-		domainHookData := domainHookTmplData{
-			Type:   "Sidecar",
-			Socket: DomainSocketPathForEntrypoint(p.name, entrypoint),
-		}
-		if first.condition != "" {
-			domainHookData.Condition = first.condition
-		}
-		if first.failureStrategy != nil {
-			domainHookData.FailureStrategy = string(*first.failureStrategy)
-		}
-		if first.timeout != nil {
-			domainHookData.Timeout = first.timeout.String()
-		}
+			hooks := p.domainHooksForEntrypoint(entrypoint)
+			if err := validateDomainHookConsistency(entrypoint, hooks); err != nil {
+				return "", err
+			}
+			first := hooks[0]
 
-		data.DomainHooks = append(data.DomainHooks, domainHookData)
+			hookData := domainHookTmplData{
+				Socket: DomainSocketPathForEntrypoint(p.name, entrypoint),
+			}
+			if first.condition != "" {
+				hookData.Condition = first.condition
+			}
+			if first.failureStrategy != nil {
+				hookData.FailureStrategy = string(*first.failureStrategy)
+			}
+			if first.timeout != nil {
+				hookData.Timeout = first.timeout.String()
+			}
+			data.DomainHooks = append(data.DomainHooks, hookData)
+		}
 	}
 
 	for _, nodeHook := range p.nodeHooks {
@@ -466,9 +498,19 @@ func (p *Plugin) uniqueNodeEntrypoints() []string {
 }
 
 func (p *Plugin) uniqueDomainEntrypoints() []string {
-	return collectUniqueEntrypoints(p.domainHooks, func(hook DomainHookOption) string {
+	return collectUniqueEntrypoints(p.sidecarDomainHooks(), func(hook DomainHookOption) string {
 		return p.resolveEntrypoint(hook.entrypoint)
 	})
+}
+
+func (p *Plugin) sidecarDomainHooks() []DomainHookOption {
+	var result []DomainHookOption
+	for _, h := range p.domainHooks {
+		if !h.isCEL() {
+			result = append(result, h)
+		}
+	}
+	return result
 }
 
 func readGoVersion(dir string) (string, error) {
@@ -523,6 +565,10 @@ func renderTemplate(tmplStr string, data any) (string, error) {
 				quoted[i] = `"` + s + `"`
 			}
 			return "[" + strings.Join(quoted, ", ") + "]"
+		},
+		"yamlStr": func(s string) string {
+			data, _ := json.Marshal(s)
+			return string(data)
 		},
 	}
 

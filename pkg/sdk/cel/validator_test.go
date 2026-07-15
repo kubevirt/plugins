@@ -132,3 +132,24 @@ func TestEvaluateDomainHookConditionInvalidExpr(t *testing.T) {
 		t.Fatalf("expected CEL compilation error, got: %v", err)
 	}
 }
+
+func TestValidateDomainCELExpressionValid(t *testing.T) {
+	validExprs := []string{
+		"domain.name == 'test'",
+		"vmi.metadata.name == 'my-vmi'",
+		"domainSpec.cpu.topology.cores > 2",
+		"true",
+	}
+
+	for _, expr := range validExprs {
+		if err := ValidateDomainCELExpression(expr); err != nil {
+			t.Fatalf("expected valid expression %q, got error: %v", expr, err)
+		}
+	}
+}
+
+func TestValidateDomainCELExpressionInvalid(t *testing.T) {
+	if err := ValidateDomainCELExpression("invalid >>><< expression"); err == nil {
+		t.Fatal("expected error for invalid CEL expression")
+	}
+}
