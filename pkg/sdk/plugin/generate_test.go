@@ -634,8 +634,8 @@ func TestGenerateMAP(t *testing.T) {
 	var m testMAP
 	readAndUnmarshal(t, findGeneratedFile(t, outputDir, "mutating-admission-policy.yaml"), &m)
 
-	if m.APIVersion != "admissionregistration.k8s.io/v1alpha1" {
-		t.Fatalf("expected apiVersion admissionregistration.k8s.io/v1alpha1, got %q", m.APIVersion)
+	if m.APIVersion != "admissionregistration.k8s.io/v1" {
+		t.Fatalf("expected apiVersion admissionregistration.k8s.io/v1, got %q", m.APIVersion)
 	}
 
 	if m.Kind != "MutatingAdmissionPolicy" {

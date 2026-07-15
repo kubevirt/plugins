@@ -169,7 +169,7 @@ roleRef:
   apiGroup: rbac.authorization.k8s.io
 `
 
-const mapTmplStr = `apiVersion: admissionregistration.k8s.io/v1alpha1
+const mapTmplStr = `apiVersion: admissionregistration.k8s.io/v1
 kind: MutatingAdmissionPolicy
 metadata:
   name: {{ .Name }}
@@ -197,7 +197,7 @@ spec:
         }
 `
 
-const mapBindingTmplStr = `apiVersion: admissionregistration.k8s.io/v1alpha1
+const mapBindingTmplStr = `apiVersion: admissionregistration.k8s.io/v1
 kind: MutatingAdmissionPolicyBinding
 metadata:
   name: {{ .Name }}
