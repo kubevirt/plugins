@@ -1,6 +1,7 @@
 package plugin
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -139,7 +140,8 @@ type testMAP struct {
 			APIVersion string `yaml:"apiVersion"`
 			Kind       string `yaml:"kind"`
 		} `yaml:"paramKind"`
-		ReinvocationPolicy string `yaml:"reinvocationPolicy"`
+		ReinvocationPolicy string                `yaml:"reinvocationPolicy"`
+		Mutations          []testMAPMutation     `yaml:"mutations,omitempty"`
 	} `yaml:"spec"`
 }
 
@@ -155,6 +157,13 @@ type testMAPBinding struct {
 			Name string `yaml:"name"`
 		} `yaml:"paramRef"`
 	} `yaml:"spec"`
+}
+
+type testMAPMutation struct {
+	PatchType          string `yaml:"patchType"`
+	ApplyConfiguration struct {
+		Expression string `yaml:"expression"`
+	} `yaml:"applyConfiguration"`
 }
 
 // Helpers
@@ -902,40 +911,38 @@ func TestGenerateMultiEntrypointMAPs(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	var mapA testMAP
-	readAndUnmarshal(t, findGeneratedFile(t, outputDir, "ep-a-mutating-admission-policy.yaml"), &mapA)
+	// Single MAP for all entrypoints
+	var m testMAP
+	readAndUnmarshal(t, findGeneratedFile(t, outputDir, "mutating-admission-policy.yaml"), &m)
 
-	if mapA.Metadata.Name != "test-plugin-ep-a" {
-		t.Fatalf("expected MAP name 'test-plugin-ep-a', got %q", mapA.Metadata.Name)
+	if m.Metadata.Name != "test-plugin" {
+		t.Fatalf("expected single MAP named 'test-plugin', got %q", m.Metadata.Name)
 	}
 
-	var mapB testMAP
-	readAndUnmarshal(t, findGeneratedFile(t, outputDir, "ep-b-mutating-admission-policy.yaml"), &mapB)
-
-	if mapB.Metadata.Name != "test-plugin-ep-b" {
-		t.Fatalf("expected MAP name 'test-plugin-ep-b', got %q", mapB.Metadata.Name)
+	// No per-entrypoint MAP files should exist
+	if generatedFileExists(outputDir, "ep-a-mutating-admission-policy.yaml") {
+		t.Fatal("expected no per-entrypoint MAP files")
 	}
 
-	var bindingA testMAPBinding
-	readAndUnmarshal(t, findGeneratedFile(t, outputDir, "ep-a-mutating-admission-policy-binding.yaml"), &bindingA)
-
-	if bindingA.Spec.PolicyName != "test-plugin-ep-a" {
-		t.Fatalf("expected binding policyName 'test-plugin-ep-a', got %q", bindingA.Spec.PolicyName)
+	if generatedFileExists(outputDir, "ep-b-mutating-admission-policy.yaml") {
+		t.Fatal("expected no per-entrypoint MAP files")
 	}
 
-	if bindingA.Spec.ParamRef.Name != "test-plugin" {
-		t.Fatalf("expected paramRef name 'test-plugin', got %q", bindingA.Spec.ParamRef.Name)
+	// Single binding
+	var mb testMAPBinding
+	readAndUnmarshal(t, findGeneratedFile(t, outputDir, "mutating-admission-policy-binding.yaml"), &mb)
+
+	if mb.Spec.PolicyName != "test-plugin" {
+		t.Fatalf("expected binding policyName 'test-plugin', got %q", mb.Spec.PolicyName)
 	}
 
-	var bindingB testMAPBinding
-	readAndUnmarshal(t, findGeneratedFile(t, outputDir, "ep-b-mutating-admission-policy-binding.yaml"), &bindingB)
-
-	if bindingB.Spec.PolicyName != "test-plugin-ep-b" {
-		t.Fatalf("expected binding policyName 'test-plugin-ep-b', got %q", bindingB.Spec.PolicyName)
+	if mb.Spec.ParamRef.Name != "test-plugin" {
+		t.Fatalf("expected paramRef name 'test-plugin', got %q", mb.Spec.ParamRef.Name)
 	}
 
-	if bindingB.Spec.ParamRef.Name != "test-plugin" {
-		t.Fatalf("expected paramRef name 'test-plugin', got %q", bindingB.Spec.ParamRef.Name)
+	// No per-entrypoint binding files
+	if generatedFileExists(outputDir, "ep-a-mutating-admission-policy-binding.yaml") {
+		t.Fatal("expected no per-entrypoint binding files")
 	}
 }
 
@@ -1032,6 +1039,14 @@ func TestGenerateSingleEntrypointBackwardCompat(t *testing.T) {
 
 	if m.Metadata.Name != "test-plugin" {
 		t.Fatalf("expected MAP name 'test-plugin', got %q", m.Metadata.Name)
+	}
+
+	if len(m.Spec.Mutations) != 1 {
+		t.Fatalf("expected 1 mutation, got %d", len(m.Spec.Mutations))
+	}
+
+	if m.Spec.Mutations[0].PatchType != "ApplyConfiguration" {
+		t.Fatalf("expected patchType ApplyConfiguration, got %q", m.Spec.Mutations[0].PatchType)
 	}
 }
 
@@ -1403,5 +1418,224 @@ func TestGenerateCELExpressionWithDoubleQuotes(t *testing.T) {
 
 	if cr.Spec.DomainHooks[0].CEL.Expression != expr {
 		t.Fatalf("expected expression to round-trip, got %q", cr.Spec.DomainHooks[0].CEL.Expression)
+	}
+}
+
+func TestCelStringLiteral(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		expected string
+	}{
+		{"simple", `hello`, `"hello"`},
+		{"with double quotes", `say "hi"`, `"say \"hi\""`},
+		{"with backslash", `path\to`, `"path\\to"`},
+		{"backslash before quote", `a\"b`, `"a\\\"b"`},
+		{"json payload", `[{"image":"test:latest"}]`, `"[{\"image\":\"test:latest\"}]"`},
+		{"empty", ``, `""`},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := celStringLiteral(tt.input)
+			if result != tt.expected {
+				t.Fatalf("celStringLiteral(%q) = %q, want %q", tt.input, result, tt.expected)
+			}
+		})
+	}
+}
+
+func TestGenerateMAPMutations(t *testing.T) {
+	sourceDir := setupSourceDir(t)
+	outputDir := filepath.Join(t.TempDir(), "deploy")
+
+	p := New("test-plugin").WithDomainHook(ForLibvirt(&stubDomainHandler{}))
+	if err := p.generate(outputDir, sourceDir); err != nil {
+		t.Fatal(err)
+	}
+
+	mapFile := findGeneratedFile(t, outputDir, "mutating-admission-policy.yaml")
+	content := readFileContent(t, mapFile)
+
+	if !strings.Contains(content, "mutations:") {
+		t.Fatalf("expected MAP to contain mutations field, got:\n%s", content)
+	}
+
+	if !strings.Contains(content, "patchType: ApplyConfiguration") {
+		t.Fatalf("expected patchType ApplyConfiguration, got:\n%s", content)
+	}
+
+	if !strings.Contains(content, "hooks.kubevirt.io/hookSidecars") {
+		t.Fatalf("expected hookSidecars annotation in expression, got:\n%s", content)
+	}
+
+	if !strings.Contains(content, "quay.io/myorg/test-plugin:latest") {
+		t.Fatalf("expected default image in sidecar annotation, got:\n%s", content)
+	}
+}
+
+func TestGenerateMAPMutationsWithCustomImage(t *testing.T) {
+	sourceDir := setupSourceDir(t)
+	outputDir := filepath.Join(t.TempDir(), "deploy")
+
+	p := New("test-plugin").
+		WithImage("registry.example.com/my-plugin:v1.0").
+		WithDomainHook(ForLibvirt(&stubDomainHandler{}))
+	if err := p.generate(outputDir, sourceDir); err != nil {
+		t.Fatal(err)
+	}
+
+	content := readFileContent(t, findGeneratedFile(t, outputDir, "mutating-admission-policy.yaml"))
+
+	if !strings.Contains(content, "registry.example.com/my-plugin:v1.0") {
+		t.Fatalf("expected custom image in MAP mutations, got:\n%s", content)
+	}
+
+	if strings.Contains(content, "quay.io/myorg") {
+		t.Fatalf("expected no default image when custom image set, got:\n%s", content)
+	}
+}
+
+func TestGenerateMAPMutationsMultiEntrypoint(t *testing.T) {
+	sourceDir := setupSourceDir(t)
+	outputDir := filepath.Join(t.TempDir(), "deploy")
+
+	p := New("test-plugin").
+		WithDomainHook(ForLibvirt(&stubDomainHandler{}).WithEntrypoint("ep-a")).
+		WithDomainHook(ForLibvirt(&stubDomainHandler{}).WithEntrypoint("ep-b"))
+	if err := p.generate(outputDir, sourceDir); err != nil {
+		t.Fatal(err)
+	}
+
+	content := readFileContent(t, findGeneratedFile(t, outputDir, "mutating-admission-policy.yaml"))
+
+	if !strings.Contains(content, "--entrypoint") {
+		t.Fatalf("expected --entrypoint args in multi-entrypoint MAP, got:\n%s", content)
+	}
+
+	if !strings.Contains(content, "ep-a") {
+		t.Fatalf("expected ep-a in MAP mutations, got:\n%s", content)
+	}
+
+	if !strings.Contains(content, "ep-b") {
+		t.Fatalf("expected ep-b in MAP mutations, got:\n%s", content)
+	}
+}
+
+func TestGenerateMAPMutationsJSONRoundTrip(t *testing.T) {
+	sourceDir := setupSourceDir(t)
+	outputDir := filepath.Join(t.TempDir(), "deploy")
+
+	p := New("test-plugin").
+		WithImage("registry.example.com/my-plugin:v1.0").
+		WithImagePullPolicy("Always").
+		WithDomainHook(ForLibvirt(&stubDomainHandler{}).WithEntrypoint("ep-a")).
+		WithDomainHook(ForLibvirt(&stubDomainHandler{}).WithEntrypoint("ep-b"))
+	if err := p.generate(outputDir, sourceDir); err != nil {
+		t.Fatal(err)
+	}
+
+	content := readFileContent(t, findGeneratedFile(t, outputDir, "mutating-admission-policy.yaml"))
+
+	// Extract the CEL string value from the expression
+	// The annotation value is between the first and last escaped quotes on the hookSidecars line
+	lines := strings.Split(content, "\n")
+	var annotationLine string
+	for _, line := range lines {
+		if strings.Contains(line, "hooks.kubevirt.io/hookSidecars") {
+			annotationLine = strings.TrimSpace(line)
+			break
+		}
+	}
+
+	if annotationLine == "" {
+		t.Fatal("could not find hookSidecars annotation line")
+	}
+
+	// Extract JSON from CEL: the line looks like:
+	// "hooks.kubevirt.io/hookSidecars": "[{\"image\":\"...\"}]"
+	// Find the second ": " and extract the CEL string value
+	colonIdx := strings.Index(annotationLine, `": `)
+	if colonIdx < 0 {
+		t.Fatalf("could not find colon separator in annotation line: %s", annotationLine)
+	}
+	celValue := strings.TrimSpace(annotationLine[colonIdx+3:])
+
+	// Remove surrounding quotes
+	if len(celValue) < 2 || celValue[0] != '"' || celValue[len(celValue)-1] != '"' {
+		t.Fatalf("expected quoted CEL string, got: %s", celValue)
+	}
+	escaped := celValue[1 : len(celValue)-1]
+
+	// Reverse CEL escaping: \" -> " and \\ -> \
+	jsonStr := strings.ReplaceAll(escaped, `\"`, `"`)
+	jsonStr = strings.ReplaceAll(jsonStr, `\\`, `\`)
+
+	// Parse JSON
+	var sidecars []hookSidecar
+	if err := json.Unmarshal([]byte(jsonStr), &sidecars); err != nil {
+		t.Fatalf("sidecar annotation is not valid JSON after unescaping: %v\nJSON: %s\nFull CEL value: %s", err, jsonStr, celValue)
+	}
+
+	if len(sidecars) != 2 {
+		t.Fatalf("expected 2 sidecars, got %d: %+v", len(sidecars), sidecars)
+	}
+
+	for _, sc := range sidecars {
+		if sc.Image != "registry.example.com/my-plugin:v1.0" {
+			t.Fatalf("expected custom image, got %q", sc.Image)
+		}
+		if sc.ImagePullPolicy != "Always" {
+			t.Fatalf("expected imagePullPolicy Always, got %q", sc.ImagePullPolicy)
+		}
+	}
+
+	// First sidecar should have --entrypoint ep-a
+	if len(sidecars[0].Args) != 2 || sidecars[0].Args[1] != "ep-a" {
+		t.Fatalf("expected first sidecar args [--entrypoint ep-a], got %v", sidecars[0].Args)
+	}
+
+	// Second sidecar should have --entrypoint ep-b
+	if len(sidecars[1].Args) != 2 || sidecars[1].Args[1] != "ep-b" {
+		t.Fatalf("expected second sidecar args [--entrypoint ep-b], got %v", sidecars[1].Args)
+	}
+}
+
+func TestGenerateDaemonSetWithCustomImage(t *testing.T) {
+	sourceDir := setupSourceDir(t)
+	outputDir := filepath.Join(t.TempDir(), "deploy")
+
+	p := New("test-plugin").
+		WithImage("registry.example.com/my-plugin:v1.0").
+		WithNodeHook(PreVMStart, NodeHandler(&stubNodeHandler{}))
+	if err := p.generate(outputDir, sourceDir); err != nil {
+		t.Fatal(err)
+	}
+
+	var ds testDaemonSet
+	readAndUnmarshal(t, findGeneratedFile(t, outputDir, "daemonset.yaml"), &ds)
+
+	container := ds.Spec.Template.Spec.Containers[0]
+	if container.Image != "registry.example.com/my-plugin:v1.0" {
+		t.Fatalf("expected custom image, got %q", container.Image)
+	}
+}
+
+func TestGenerateDaemonSetWithImagePullPolicy(t *testing.T) {
+	sourceDir := setupSourceDir(t)
+	outputDir := filepath.Join(t.TempDir(), "deploy")
+
+	p := New("test-plugin").
+		WithImage("registry.example.com/my-plugin:v1.0").
+		WithImagePullPolicy("Always").
+		WithNodeHook(PreVMStart, NodeHandler(&stubNodeHandler{}))
+	if err := p.generate(outputDir, sourceDir); err != nil {
+		t.Fatal(err)
+	}
+
+	content := readFileContent(t, findGeneratedFile(t, outputDir, "daemonset.yaml"))
+
+	if !strings.Contains(content, "imagePullPolicy: Always") {
+		t.Fatalf("expected imagePullPolicy Always in DaemonSet, got:\n%s", content)
 	}
 }

@@ -3,25 +3,8 @@ package plugin
 import (
 	"path/filepath"
 
-	corev1 "k8s.io/api/core/v1"
 	v1 "kubevirt.io/api/core/v1"
-	"libvirt.org/go/libvirtxml"
 )
-
-// DomainHookRequest contains the inputs passed to a domain hook handler.
-// While the handler interface accepts individual fields, InvocationContext is
-// made available via Go context values. Use InvocationContextFromContext(ctx)
-// to retrieve it from the handler's context parameter.
-type DomainHookRequest struct {
-	// Domain is the libvirt domain XML being mutated.
-	Domain *libvirtxml.Domain
-	// VMI is the VirtualMachineInstance that owns this domain.
-	VMI *v1.VirtualMachineInstance
-	// DomainType identifies the hypervisor backend (e.g. "libvirt").
-	DomainType string
-	// InvocationContext indicates when the hook is invoked (e.g. "onDefineDomain").
-	InvocationContext string
-}
 
 // NodeHookRequest contains the inputs passed to a node hook handler.
 type NodeHookRequest struct {
@@ -41,16 +24,9 @@ const (
 	Ignore FailureStrategy = "Ignore"
 )
 
-// SidecarConfig defines the container and volumes injected alongside virt-launcher for a domain hook.
-// It will be used when MutatingAdmissionPolicy-based sidecar generation is fully implemented.
-type SidecarConfig struct {
-	// Container is the sidecar container spec injected into the virt-launcher pod.
-	Container corev1.Container
-	// Volumes are additional volumes mounted into the virt-launcher pod.
-	Volumes []corev1.Volume
-}
-
 const (
+	// HookSidecarAnnotationName is the VMI annotation key for sidecar injection. Also used in the MAP template (generate.go).
+	HookSidecarAnnotationName = "hooks.kubevirt.io/hookSidecars"
 	// DomainSocketBasePath is the base directory for domain hook sockets.
 	DomainSocketBasePath = "/var/run/kubevirt-plugin"
 	// NodeSocketBasePath is the base directory for node hook sockets.

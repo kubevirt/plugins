@@ -528,6 +528,24 @@ func TestCELDomainHookWithPerHookSettings(t *testing.T) {
 	}
 }
 
+func TestPanicsOnEmptyImage(t *testing.T) {
+	defer func() {
+		if r := recover(); r == nil {
+			t.Fatal("expected panic for empty image")
+		}
+	}()
+	New("test-plugin").WithImage("")
+}
+
+func TestPanicsOnEmptyImagePullPolicy(t *testing.T) {
+	defer func() {
+		if r := recover(); r == nil {
+			t.Fatal("expected panic for empty image pull policy")
+		}
+	}()
+	New("test-plugin").WithImagePullPolicy("")
+}
+
 func TestCELDomainHookWithEntrypointPanics(t *testing.T) {
 	defer func() {
 		if r := recover(); r == nil {
