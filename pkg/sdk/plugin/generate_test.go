@@ -35,11 +35,11 @@ type testPluginCR struct {
 			Timeout         string `yaml:"timeout,omitempty"`
 		} `yaml:"domainHooks,omitempty"`
 		NodeHooks []struct {
-			HookPoint       string `yaml:"hookPoint"`
-			Socket          string `yaml:"socket"`
-			Condition       string `yaml:"condition,omitempty"`
-			FailureStrategy string `yaml:"failureStrategy,omitempty"`
-			Timeout         string `yaml:"timeout,omitempty"`
+			PermittedHooks  []string `yaml:"permittedHooks"`
+			Socket          string   `yaml:"socket"`
+			Condition       string   `yaml:"condition,omitempty"`
+			FailureStrategy string   `yaml:"failureStrategy,omitempty"`
+			Timeout         string   `yaml:"timeout,omitempty"`
 		} `yaml:"nodeHooks,omitempty"`
 	} `yaml:"spec"`
 }
@@ -291,8 +291,8 @@ func TestGeneratePluginCRNodeHookOnly(t *testing.T) {
 		t.Fatalf("expected 1 nodeHook, got %d", len(cr.Spec.NodeHooks))
 	}
 
-	if cr.Spec.NodeHooks[0].HookPoint != PreVMStart {
-		t.Fatalf("expected hookPoint %q, got %q", PreVMStart, cr.Spec.NodeHooks[0].HookPoint)
+	if len(cr.Spec.NodeHooks[0].PermittedHooks) != 1 || cr.Spec.NodeHooks[0].PermittedHooks[0] != PreVMStart {
+		t.Fatalf("expected permittedHooks [%q], got %v", PreVMStart, cr.Spec.NodeHooks[0].PermittedHooks)
 	}
 
 	if cr.Spec.NodeHooks[0].Socket != "/var/run/kubevirt/plugins/test-plugin/node.sock" {
@@ -301,6 +301,37 @@ func TestGeneratePluginCRNodeHookOnly(t *testing.T) {
 
 	if len(cr.Spec.DomainHooks) != 0 {
 		t.Fatal("expected no domainHooks")
+	}
+}
+
+func TestGenerateNodeHookMultipleHookPointsSameEntrypoint(t *testing.T) {
+	sourceDir := setupSourceDir(t)
+	outputDir := filepath.Join(t.TempDir(), "deploy")
+
+	p := New("test-plugin").
+		WithNodeHook(PreVMStart, NodeHandler(&stubNodeHandler{})).
+		WithNodeHook(PostVMStop, NodeHandler(&stubNodeHandler{}))
+	if err := p.generate(outputDir, sourceDir); err != nil {
+		t.Fatal(err)
+	}
+
+	var cr testPluginCR
+	readAndUnmarshal(t, findGeneratedFile(t, outputDir, "plugin.yaml"), &cr)
+
+	if len(cr.Spec.NodeHooks) != 1 {
+		t.Fatalf("expected 1 nodeHook entry (grouped), got %d", len(cr.Spec.NodeHooks))
+	}
+
+	if len(cr.Spec.NodeHooks[0].PermittedHooks) != 2 {
+		t.Fatalf("expected 2 permittedHooks, got %d", len(cr.Spec.NodeHooks[0].PermittedHooks))
+	}
+
+	if cr.Spec.NodeHooks[0].PermittedHooks[0] != PreVMStart {
+		t.Fatalf("expected first hook point %q, got %q", PreVMStart, cr.Spec.NodeHooks[0].PermittedHooks[0])
+	}
+
+	if cr.Spec.NodeHooks[0].PermittedHooks[1] != PostVMStop {
+		t.Fatalf("expected second hook point %q, got %q", PostVMStop, cr.Spec.NodeHooks[0].PermittedHooks[1])
 	}
 }
 
@@ -1115,6 +1146,63 @@ func TestGenerateConflictingDomainHooksSameEntrypoint(t *testing.T) {
 		p := New("test-plugin").
 			WithDomainHook(ForLibvirt(&stubDomainHandler{}).WithTimeout(10 * time.Second)).
 			WithDomainHook(ForLibvirt(&stubDomainHandler{}))
+		err := p.generate(outputDir, sourceDir)
+		if err == nil {
+			t.Fatal("expected error when one hook has timeout and another does not")
+		}
+		if !strings.Contains(err.Error(), "conflicting timeouts") {
+			t.Fatalf("expected conflicting timeouts error, got: %v", err)
+		}
+	})
+}
+
+func TestGenerateConflictingNodeHooksSameEntrypoint(t *testing.T) {
+	sourceDir := setupSourceDir(t)
+	outputDir := filepath.Join(t.TempDir(), "deploy")
+
+	t.Run("conflicting conditions", func(t *testing.T) {
+		p := New("test-plugin").
+			WithNodeHook(PreVMStart, NodeHandler(&stubNodeHandler{}).WithCondition("vmi.metadata.name == 'a'")).
+			WithNodeHook(PostVMStop, NodeHandler(&stubNodeHandler{}).WithCondition("vmi.metadata.name == 'b'"))
+		err := p.generate(outputDir, sourceDir)
+		if err == nil {
+			t.Fatal("expected error for conflicting conditions")
+		}
+		if !strings.Contains(err.Error(), "conflicting conditions") {
+			t.Fatalf("expected conflicting conditions error, got: %v", err)
+		}
+	})
+
+	t.Run("conflicting timeouts", func(t *testing.T) {
+		p := New("test-plugin").
+			WithNodeHook(PreVMStart, NodeHandler(&stubNodeHandler{}).WithTimeout(10 * time.Second)).
+			WithNodeHook(PostVMStop, NodeHandler(&stubNodeHandler{}).WithTimeout(30 * time.Second))
+		err := p.generate(outputDir, sourceDir)
+		if err == nil {
+			t.Fatal("expected error for conflicting timeouts")
+		}
+		if !strings.Contains(err.Error(), "conflicting timeouts") {
+			t.Fatalf("expected conflicting timeouts error, got: %v", err)
+		}
+	})
+
+	t.Run("conflicting failure strategies", func(t *testing.T) {
+		p := New("test-plugin").
+			WithNodeHook(PreVMStart, NodeHandler(&stubNodeHandler{}).WithFailureStrategy(Fail)).
+			WithNodeHook(PostVMStop, NodeHandler(&stubNodeHandler{}).WithFailureStrategy(Ignore))
+		err := p.generate(outputDir, sourceDir)
+		if err == nil {
+			t.Fatal("expected error for conflicting failure strategies")
+		}
+		if !strings.Contains(err.Error(), "conflicting failure strategies") {
+			t.Fatalf("expected conflicting failure strategies error, got: %v", err)
+		}
+	})
+
+	t.Run("one set one unset timeout", func(t *testing.T) {
+		p := New("test-plugin").
+			WithNodeHook(PreVMStart, NodeHandler(&stubNodeHandler{}).WithTimeout(10 * time.Second)).
+			WithNodeHook(PostVMStop, NodeHandler(&stubNodeHandler{}))
 		err := p.generate(outputDir, sourceDir)
 		if err == nil {
 			t.Fatal("expected error when one hook has timeout and another does not")

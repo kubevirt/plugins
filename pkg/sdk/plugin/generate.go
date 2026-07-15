@@ -29,7 +29,7 @@ type domainHookTmplData struct {
 }
 
 type nodeHookTmplData struct {
-	HookPoint       string
+	HookPoints      []string
 	Socket          string
 	Condition       string
 	FailureStrategy string
@@ -78,7 +78,10 @@ spec:
 {{- if .NodeHooks }}
   nodeHooks:
 {{- range .NodeHooks }}
-  - hookPoint: {{ .HookPoint }}
+  - permittedHooks:
+{{- range .HookPoints }}
+    - {{ . }}
+{{- end }}
     socket: {{ .Socket }}
 {{- if .Condition }}
     condition: "{{ .Condition }}"
@@ -402,20 +405,37 @@ func (p *Plugin) renderPluginCR() (string, error) {
 		}
 	}
 
+	renderedNodeEntrypoints := map[string]bool{}
 	for _, nodeHook := range p.nodeHooks {
 		entrypoint := p.resolveEntrypoint(nodeHook.entrypoint)
+		if renderedNodeEntrypoints[entrypoint] {
+			continue
+		}
+		renderedNodeEntrypoints[entrypoint] = true
+
+		hooks := p.nodeHooksForEntrypoint(entrypoint)
+		if err := validateNodeHookConsistency(entrypoint, hooks); err != nil {
+			return "", err
+		}
+		first := hooks[0]
+
+		var hookPoints []string
+		for _, h := range hooks {
+			hookPoints = append(hookPoints, h.hookPoint)
+		}
+
 		nodeHookData := nodeHookTmplData{
-			HookPoint: nodeHook.hookPoint,
-			Socket:    NodeSocketPathForEntrypoint(p.name, entrypoint),
+			HookPoints: hookPoints,
+			Socket:     NodeSocketPathForEntrypoint(p.name, entrypoint),
 		}
-		if nodeHook.condition != "" {
-			nodeHookData.Condition = nodeHook.condition
+		if first.condition != "" {
+			nodeHookData.Condition = first.condition
 		}
-		if nodeHook.failureStrategy != nil {
-			nodeHookData.FailureStrategy = string(*nodeHook.failureStrategy)
+		if first.failureStrategy != nil {
+			nodeHookData.FailureStrategy = string(*first.failureStrategy)
 		}
-		if nodeHook.timeout != nil {
-			nodeHookData.Timeout = nodeHook.timeout.String()
+		if first.timeout != nil {
+			nodeHookData.Timeout = first.timeout.String()
 		}
 		data.NodeHooks = append(data.NodeHooks, nodeHookData)
 	}
@@ -588,6 +608,36 @@ func validateDomainHookConsistency(entrypoint string, hooks []DomainHookOption) 
 		hookTimeout := hook.timeout
 		if (firstTimeout == nil) != (hookTimeout == nil) || (firstTimeout != nil && hookTimeout != nil && *firstTimeout != *hookTimeout) {
 			return fmt.Errorf("domain hooks sharing entrypoint %q have conflicting timeouts", entrypoint)
+		}
+	}
+
+	return nil
+}
+
+func validateNodeHookConsistency(entrypoint string, hooks []NodeHookOption) error {
+	if len(hooks) <= 1 {
+		return nil
+	}
+
+	first := hooks[0]
+	for i := 1; i < len(hooks); i++ {
+		hook := hooks[i]
+
+		if hook.condition != first.condition {
+			return fmt.Errorf("node hooks sharing entrypoint %q have conflicting conditions: %q vs %q",
+				entrypoint, first.condition, hook.condition)
+		}
+
+		firstFailureStrategy := first.failureStrategy
+		hookFailureStrategy := hook.failureStrategy
+		if (firstFailureStrategy == nil) != (hookFailureStrategy == nil) || (firstFailureStrategy != nil && hookFailureStrategy != nil && *firstFailureStrategy != *hookFailureStrategy) {
+			return fmt.Errorf("node hooks sharing entrypoint %q have conflicting failure strategies", entrypoint)
+		}
+
+		firstTimeout := first.timeout
+		hookTimeout := hook.timeout
+		if (firstTimeout == nil) != (hookTimeout == nil) || (firstTimeout != nil && hookTimeout != nil && *firstTimeout != *hookTimeout) {
+			return fmt.Errorf("node hooks sharing entrypoint %q have conflicting timeouts", entrypoint)
 		}
 	}
 
