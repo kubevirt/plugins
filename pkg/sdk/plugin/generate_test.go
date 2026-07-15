@@ -724,7 +724,7 @@ func TestGenerateDockerfile(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	content := readFileContent(t, filepath.Join(sourceDir, "Dockerfile"))
+	content := readFileContent(t, filepath.Join(outputDir, "Dockerfile"))
 
 	if !strings.Contains(content, "FROM golang:1.23.0 AS builder") {
 		t.Fatalf("expected Dockerfile to contain Go version 1.23.0, got:\n%s", content)
@@ -744,7 +744,7 @@ func TestGenerateMakefile(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	content := readFileContent(t, filepath.Join(sourceDir, "Makefile"))
+	content := readFileContent(t, filepath.Join(outputDir, "Makefile"))
 
 	if !strings.Contains(content, "test-plugin") {
 		t.Fatalf("expected Makefile to contain plugin name, got:\n%s", content)
@@ -800,28 +800,24 @@ func TestGenerateFileNumbering(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	expectedYAML := []string{
+	expectedFiles := []string{
 		"01-rbac.yaml",
 		"02-daemonset.yaml",
 		"03-plugin.yaml",
 		"04-mutating-admission-policy.yaml",
 		"05-mutating-admission-policy-binding.yaml",
+		"Dockerfile",
+		"Makefile",
 	}
 
 	files := listFileNames(outputDir)
-	if len(files) != len(expectedYAML) {
-		t.Fatalf("expected %d YAML files in output dir, got %d: %v", len(expectedYAML), len(files), files)
+	if len(files) != len(expectedFiles) {
+		t.Fatalf("expected %d files in output dir, got %d: %v", len(expectedFiles), len(files), files)
 	}
 
-	for i, name := range expectedYAML {
+	for i, name := range expectedFiles {
 		if files[i] != name {
 			t.Fatalf("file %d: expected %q, got %q (all files: %v)", i, name, files[i], files)
-		}
-	}
-
-	for _, name := range []string{"Dockerfile", "Makefile"} {
-		if _, err := os.Stat(filepath.Join(sourceDir, name)); os.IsNotExist(err) {
-			t.Fatalf("expected %s in source dir %s", name, sourceDir)
 		}
 	}
 }
@@ -1375,7 +1371,7 @@ func TestGenerateCELDomainHookWithNodeHook(t *testing.T) {
 	}
 
 	// Dockerfile should be generated (node hook needs container)
-	if _, err := os.Stat(filepath.Join(sourceDir, "Dockerfile")); os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(outputDir, "Dockerfile")); os.IsNotExist(err) {
 		t.Fatal("expected Dockerfile for node hook plugin")
 	}
 }
@@ -1389,11 +1385,11 @@ func TestGenerateCELOnlyNoDockerfile(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := os.Stat(filepath.Join(sourceDir, "Dockerfile")); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(outputDir, "Dockerfile")); !os.IsNotExist(err) {
 		t.Fatal("CEL-only plugin should not generate Dockerfile")
 	}
 
-	if _, err := os.Stat(filepath.Join(sourceDir, "Makefile")); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(outputDir, "Makefile")); !os.IsNotExist(err) {
 		t.Fatal("CEL-only plugin should not generate Makefile")
 	}
 }

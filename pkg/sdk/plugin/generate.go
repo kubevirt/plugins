@@ -333,7 +333,7 @@ func (p *Plugin) generate(outputDir, sourceDir string) error {
 		if err != nil {
 			return err
 		}
-		if err := os.WriteFile(filepath.Join(sourceDir, "Dockerfile"), []byte(dockerfileContent), 0644); err != nil {
+		if err := os.WriteFile(filepath.Join(outputDir, "Dockerfile"), []byte(dockerfileContent), 0644); err != nil {
 			return fmt.Errorf("write Dockerfile: %w", err)
 		}
 
@@ -341,7 +341,7 @@ func (p *Plugin) generate(outputDir, sourceDir string) error {
 		if err != nil {
 			return err
 		}
-		if err := os.WriteFile(filepath.Join(sourceDir, "Makefile"), []byte(makefileContent), 0644); err != nil {
+		if err := os.WriteFile(filepath.Join(outputDir, "Makefile"), []byte(makefileContent), 0644); err != nil {
 			return fmt.Errorf("write Makefile: %w", err)
 		}
 	}
