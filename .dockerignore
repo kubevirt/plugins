@@ -1,0 +1,8 @@
+.git/
+_kubevirtci/
+_out/
+_output/
+bin/
+.claude/
+.idea/
+.vscode/

@@ -27,7 +27,11 @@ Thumbs.db
 
 # Build output
 _output/
+_out/
 bin/
+
+# kubevirtci
+_kubevirtci/
 
 # Claude
 .claude/
