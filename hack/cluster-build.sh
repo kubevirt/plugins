@@ -15,33 +15,36 @@ source "${KUBEVIRTCI_CONFIG_PATH}/${KUBEVIRT_PROVIDER}/config-provider-${KUBEVIR
 # Fail early if the cluster isn't up (docker_prefix would be empty).
 : ${docker_prefix:?"docker_prefix not set - is the cluster running?"}
 
-PLUGIN_DIR="tests/plugins"
-if [ ! -d "${PLUGIN_DIR}" ]; then
-    echo "No test plugins found in ${PLUGIN_DIR}, skipping."
-    exit 0
-fi
-
 if command -v podman &>/dev/null; then
     BUILDER="podman"
 else
     BUILDER="docker"
 fi
 
-for plugin in "${PLUGIN_DIR}"/*/; do
-    [ -d "${plugin}" ] || continue
-    plugin_name=$(basename "${plugin}")
+found=0
+for plugin_file in tests/*/plugin.go; do
+    [ -f "${plugin_file}" ] || continue
+    grep -q '^package main' "${plugin_file}" || continue
+    found=1
+    plugin_dir=$(dirname "${plugin_file}")
+    plugin_name=$(basename "${plugin_dir}")
     image="${docker_prefix}/${plugin_name}:${DOCKER_TAG}"
 
     echo "Building ${image}..."
     ${BUILDER} build \
         -t "${image}" \
         -f Dockerfile.test-plugin \
-        --build-arg "PLUGIN_PATH=${plugin}" \
+        --build-arg "PLUGIN_PATH=${plugin_dir}" \
         .
 
     # kubevirtci's local registry is HTTP-only, so TLS verification must be skipped.
     echo "Pushing ${image}..."
     ${BUILDER} push --tls-verify=false "${image}"
 done
+
+if [ "${found}" -eq 0 ]; then
+    echo "No test plugins found (no tests/*/plugin.go), skipping."
+    exit 0
+fi
 
 echo "Done building test plugin images."
