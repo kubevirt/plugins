@@ -71,7 +71,8 @@ spec:
 {{- if .NodeHooks }}
   nodeHooks:
 {{- range .NodeHooks }}
-  - hookPoint: {{ .HookPoint }}
+  - permittedHooks:
+    - {{ .HookPoint }}
     socket: {{ .Socket }}
 {{- if .Condition }}
     condition: "{{ .Condition }}"
@@ -106,7 +107,12 @@ spec:
 {{- end }}
       containers:
       - name: {{ .Name }}
-        image: quay.io/myorg/{{ .PluginName }}:latest
+        image: {{ .Image }}
+{{- if .ImagePullPolicy }}
+        imagePullPolicy: {{ .ImagePullPolicy }}
+{{- end }}
+        securityContext:
+          privileged: true
 {{- if .Args }}
         args:
 {{- range .Args }}
@@ -159,7 +165,7 @@ roleRef:
   apiGroup: rbac.authorization.k8s.io
 `
 
-const mapTmplStr = `apiVersion: admissionregistration.k8s.io/v1alpha1
+const mapTmplStr = `apiVersion: admissionregistration.k8s.io/v1
 kind: MutatingAdmissionPolicy
 metadata:
   name: {{ .Name }}
@@ -183,7 +189,7 @@ spec:
       expression: {{ .JSONPatchExpression }}
 `
 
-const mapBindingTmplStr = `apiVersion: admissionregistration.k8s.io/v1alpha1
+const mapBindingTmplStr = `apiVersion: admissionregistration.k8s.io/v1
 kind: MutatingAdmissionPolicyBinding
 metadata:
   name: {{ .Name }}
@@ -420,11 +426,15 @@ func (p *Plugin) renderDaemonSet(entrypoint string) (string, error) {
 	data := struct {
 		Name               string
 		PluginName         string
+		Image              string
+		ImagePullPolicy    string
 		ServiceAccountName string
 		Args               []string
 	}{
-		Name:       name,
-		PluginName: p.name,
+		Name:            name,
+		PluginName:      p.name,
+		Image:           p.resolveImage(),
+		ImagePullPolicy: p.imagePullPolicy,
 	}
 
 	if len(p.rbacRules) > 0 {
@@ -465,7 +475,7 @@ func (p *Plugin) renderMAP(entrypoint string) (string, error) {
 	var args string
 	if entrypoint != p.name {
 		args = fmt.Sprintf(`,
-            command: ["./plugin", "serve", "--entrypoint", %q]`, entrypoint)
+            command: ["/plugin", "serve", "--entrypoint", %q]`, entrypoint)
 	}
 
 	jsonPatchExpr := fmt.Sprintf(`'[
@@ -474,7 +484,7 @@ func (p *Plugin) renderMAP(entrypoint string) (string, error) {
         path: "/spec/containers/-",
         value: Object.spec.containers{
             name: %q,
-            image: "SIDECAR_IMAGE:latest"%s,
+            image: %q%s,
             securityContext: Object.spec.containers.securityContext{
                 allowPrivilegeEscalation: false,
                 runAsNonRoot: true,
@@ -492,7 +502,7 @@ func (p *Plugin) renderMAP(entrypoint string) (string, error) {
             }]
         }
     }
-]'`, containerName, args, PluginSocketsVolumeName, p.name, p.name)
+]'`, containerName, p.resolveImage(), args, PluginSocketsVolumeName, p.name, p.name)
 
 	data := struct {
 		Name                    string

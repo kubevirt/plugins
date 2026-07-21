@@ -34,11 +34,11 @@ type testPluginCR struct {
 			Timeout         string `yaml:"timeout,omitempty"`
 		} `yaml:"domainHooks,omitempty"`
 		NodeHooks []struct {
-			HookPoint       string `yaml:"hookPoint"`
-			Socket          string `yaml:"socket"`
-			Condition       string `yaml:"condition,omitempty"`
-			FailureStrategy string `yaml:"failureStrategy,omitempty"`
-			Timeout         string `yaml:"timeout,omitempty"`
+			PermittedHooks  []string `yaml:"permittedHooks"`
+			Socket          string   `yaml:"socket"`
+			Condition       string   `yaml:"condition,omitempty"`
+			FailureStrategy string   `yaml:"failureStrategy,omitempty"`
+			Timeout         string   `yaml:"timeout,omitempty"`
 		} `yaml:"nodeHooks,omitempty"`
 	} `yaml:"spec"`
 }
@@ -286,8 +286,8 @@ func TestGeneratePluginCRNodeHookOnly(t *testing.T) {
 		t.Fatalf("expected 1 nodeHook, got %d", len(cr.Spec.NodeHooks))
 	}
 
-	if cr.Spec.NodeHooks[0].HookPoint != PreVMStart {
-		t.Fatalf("expected hookPoint %q, got %q", PreVMStart, cr.Spec.NodeHooks[0].HookPoint)
+	if len(cr.Spec.NodeHooks[0].PermittedHooks) != 1 || cr.Spec.NodeHooks[0].PermittedHooks[0] != PreVMStart {
+		t.Fatalf("expected permittedHooks [%q], got %v", PreVMStart, cr.Spec.NodeHooks[0].PermittedHooks)
 	}
 
 	if cr.Spec.NodeHooks[0].Socket != "/var/run/kubevirt/plugins/test-plugin/node.sock" {
@@ -629,8 +629,8 @@ func TestGenerateMAP(t *testing.T) {
 	var m testMAP
 	readAndUnmarshal(t, findGeneratedFile(t, outputDir, "mutating-admission-policy.yaml"), &m)
 
-	if m.APIVersion != "admissionregistration.k8s.io/v1alpha1" {
-		t.Fatalf("expected apiVersion admissionregistration.k8s.io/v1alpha1, got %q", m.APIVersion)
+	if m.APIVersion != "admissionregistration.k8s.io/v1" {
+		t.Fatalf("expected apiVersion admissionregistration.k8s.io/v1, got %q", m.APIVersion)
 	}
 
 	if m.Kind != "MutatingAdmissionPolicy" {
