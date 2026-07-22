@@ -353,7 +353,7 @@ func TestGeneratePluginCRWithCondition(t *testing.T) {
 
 	p := New("test-plugin").
 		WithNodeHook(PreVMStart, NodeHandler(&stubNodeHandler{})).
-		WithCondition("vmi.labels.gpu == 'true'")
+		WithCondition("vmi.metadata.name == 'test'")
 	if err := p.generate(outputDir, sourceDir); err != nil {
 		t.Fatal(err)
 	}
@@ -361,7 +361,7 @@ func TestGeneratePluginCRWithCondition(t *testing.T) {
 	var cr testPluginCR
 	readAndUnmarshal(t, findGeneratedFile(t, outputDir, "plugin.yaml"), &cr)
 
-	if cr.Spec.Condition != "vmi.labels.gpu == 'true'" {
+	if cr.Spec.Condition != "vmi.metadata.name == 'test'" {
 		t.Fatalf("expected condition, got %q", cr.Spec.Condition)
 	}
 }
@@ -1089,8 +1089,8 @@ func TestGenerateConflictingDomainHooksSameEntrypoint(t *testing.T) {
 
 	t.Run("conflicting conditions", func(t *testing.T) {
 		p := New("test-plugin").
-			WithDomainHook(ForLibvirt(&stubDomainHandler{}).WithCondition("vmi.metadata.name == 'a'")).
-			WithDomainHook(ForLibvirt(&stubDomainHandler{}).WithCondition("vmi.metadata.name == 'b'"))
+			WithDomainHook(ForLibvirt(&stubDomainHandler{}).WithCondition("vmi.Name == 'a'")).
+			WithDomainHook(ForLibvirt(&stubDomainHandler{}).WithCondition("vmi.Name == 'b'"))
 		err := p.generate(outputDir, sourceDir)
 		if err == nil {
 			t.Fatal("expected error for conflicting conditions")
@@ -1186,7 +1186,7 @@ func TestGeneratePluginCRCELDomainHookOnly(t *testing.T) {
 	sourceDir := setupSourceDir(t)
 	outputDir := filepath.Join(t.TempDir(), "deploy")
 
-	p := New("test-plugin").WithDomainCELHook("domain.name == 'test'")
+	p := New("test-plugin").WithDomainCELHook("Domain{Name: 'test'}")
 	if err := p.generate(outputDir, sourceDir); err != nil {
 		t.Fatal(err)
 	}
@@ -1202,7 +1202,7 @@ func TestGeneratePluginCRCELDomainHookOnly(t *testing.T) {
 		t.Fatal("expected CEL domain hook")
 	}
 
-	if cr.Spec.DomainHooks[0].CEL.Expression != "domain.name == 'test'" {
+	if cr.Spec.DomainHooks[0].CEL.Expression != "Domain{Name: 'test'}" {
 		t.Fatalf("expected expression, got %q", cr.Spec.DomainHooks[0].CEL.Expression)
 	}
 
@@ -1216,8 +1216,8 @@ func TestGenerateMultipleCELDomainHooks(t *testing.T) {
 	outputDir := filepath.Join(t.TempDir(), "deploy")
 
 	p := New("test-plugin").
-		WithDomainCELHook("domain.name == 'a'").
-		WithDomainCELHook("domain.name == 'b'")
+		WithDomainCELHook("Domain{Name: 'a'}").
+		WithDomainCELHook("Domain{Name: 'b'}")
 	if err := p.generate(outputDir, sourceDir); err != nil {
 		t.Fatal(err)
 	}
@@ -1229,11 +1229,11 @@ func TestGenerateMultipleCELDomainHooks(t *testing.T) {
 		t.Fatalf("expected 2 domainHooks, got %d", len(cr.Spec.DomainHooks))
 	}
 
-	if cr.Spec.DomainHooks[0].CEL == nil || cr.Spec.DomainHooks[0].CEL.Expression != "domain.name == 'a'" {
+	if cr.Spec.DomainHooks[0].CEL == nil || cr.Spec.DomainHooks[0].CEL.Expression != "Domain{Name: 'a'}" {
 		t.Fatalf("expected first CEL expression, got %+v", cr.Spec.DomainHooks[0])
 	}
 
-	if cr.Spec.DomainHooks[1].CEL == nil || cr.Spec.DomainHooks[1].CEL.Expression != "domain.name == 'b'" {
+	if cr.Spec.DomainHooks[1].CEL == nil || cr.Spec.DomainHooks[1].CEL.Expression != "Domain{Name: 'b'}" {
 		t.Fatalf("expected second CEL expression, got %+v", cr.Spec.DomainHooks[1])
 	}
 }
@@ -1243,7 +1243,7 @@ func TestGenerateCELFirstSidecarSecondOrder(t *testing.T) {
 	outputDir := filepath.Join(t.TempDir(), "deploy")
 
 	p := New("test-plugin").
-		WithDomainCELHook("domain.name == 'cel-first'").
+		WithDomainCELHook("Domain{Name: 'cel-first'}").
 		WithDomainHook(ForLibvirt(&stubDomainHandler{}))
 	if err := p.generate(outputDir, sourceDir); err != nil {
 		t.Fatal(err)
@@ -1272,7 +1272,7 @@ func TestGenerateCELDomainHookWithNodeHook(t *testing.T) {
 	outputDir := filepath.Join(t.TempDir(), "deploy")
 
 	p := New("test-plugin").
-		WithDomainCELHook("domain.name == 'test'").
+		WithDomainCELHook("Domain{Name: 'test'}").
 		WithNodeHook(PreVMStart, NodeHandler(&stubNodeHandler{}))
 	if err := p.generate(outputDir, sourceDir); err != nil {
 		t.Fatal(err)
@@ -1311,7 +1311,7 @@ func TestGenerateCELOnlyNoDockerfile(t *testing.T) {
 	sourceDir := setupSourceDir(t)
 	outputDir := filepath.Join(t.TempDir(), "deploy")
 
-	p := New("test-plugin").WithDomainCELHook("domain.name == 'test'")
+	p := New("test-plugin").WithDomainCELHook("Domain{Name: 'test'}")
 	if err := p.generate(outputDir, sourceDir); err != nil {
 		t.Fatal(err)
 	}
@@ -1329,7 +1329,7 @@ func TestGenerateCELOnlyNoMAP(t *testing.T) {
 	sourceDir := setupSourceDir(t)
 	outputDir := filepath.Join(t.TempDir(), "deploy")
 
-	p := New("test-plugin").WithDomainCELHook("domain.name == 'test'")
+	p := New("test-plugin").WithDomainCELHook("Domain{Name: 'test'}")
 	if err := p.generate(outputDir, sourceDir); err != nil {
 		t.Fatal(err)
 	}
@@ -1349,7 +1349,7 @@ func TestGenerateMixedSidecarAndCEL(t *testing.T) {
 
 	p := New("test-plugin").
 		WithDomainHook(ForLibvirt(&stubDomainHandler{})).
-		WithDomainCELHook("domain.name == 'mutated'")
+		WithDomainCELHook("Domain{Name: 'mutated'}")
 	if err := p.generate(outputDir, sourceDir); err != nil {
 		t.Fatal(err)
 	}
@@ -1369,7 +1369,7 @@ func TestGenerateMixedSidecarAndCEL(t *testing.T) {
 		t.Fatal("expected second hook to be CEL")
 	}
 
-	if cr.Spec.DomainHooks[1].CEL.Expression != "domain.name == 'mutated'" {
+	if cr.Spec.DomainHooks[1].CEL.Expression != "Domain{Name: 'mutated'}" {
 		t.Fatalf("expected CEL expression, got %q", cr.Spec.DomainHooks[1].CEL.Expression)
 	}
 
@@ -1383,8 +1383,8 @@ func TestGenerateCELWithPerHookSettings(t *testing.T) {
 
 	timeout := 30 * time.Second
 	p := New("test-plugin").WithDomainHook(
-		CELDomainHook("domain.name == 'test'").
-			WithCondition("vmi.metadata.name == 'my-vmi'").
+		CELDomainHook("Domain{Name: 'test'}").
+			WithCondition("vmi.Name == 'my-vmi'").
 			WithFailureStrategy(Ignore).
 			WithTimeout(timeout),
 	)
@@ -1401,7 +1401,7 @@ func TestGenerateCELWithPerHookSettings(t *testing.T) {
 
 	hook := cr.Spec.DomainHooks[0]
 
-	if hook.Condition != "vmi.metadata.name == 'my-vmi'" {
+	if hook.Condition != "vmi.Name == 'my-vmi'" {
 		t.Fatalf("expected condition, got %q", hook.Condition)
 	}
 
@@ -1418,7 +1418,7 @@ func TestGenerateCELExpressionWithDoubleQuotes(t *testing.T) {
 	sourceDir := setupSourceDir(t)
 	outputDir := filepath.Join(t.TempDir(), "deploy")
 
-	expr := `domain.metadata.annotations["key"] == "value"`
+	expr := `Domain{Title: "test"}`
 	p := New("test-plugin").WithDomainCELHook(expr)
 	if err := p.generate(outputDir, sourceDir); err != nil {
 		t.Fatal(err)

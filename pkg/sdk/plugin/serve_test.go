@@ -746,7 +746,7 @@ func TestServeNonExistentEntrypointErrors(t *testing.T) {
 }
 
 func TestServeCELOnlyPluginErrors(t *testing.T) {
-	p := New("test-plugin").WithDomainCELHook("domain.name == 'test'")
+	p := New("test-plugin").WithDomainCELHook("Domain{Name: 'test'}")
 
 	err := p.Serve()
 	if err == nil {
@@ -765,7 +765,7 @@ func TestServeMixedSidecarAndCEL(t *testing.T) {
 	handler := &mutatingDomainHandler{}
 	p := New("test-plugin").
 		WithDomainHook(ForLibvirt(handler)).
-		WithDomainCELHook("domain.name == 'test'")
+		WithDomainCELHook("Domain{Name: 'test'}")
 
 	stopCh := make(chan struct{})
 	errCh := make(chan error, 1)
