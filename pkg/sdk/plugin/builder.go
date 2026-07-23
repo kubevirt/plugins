@@ -87,7 +87,7 @@ func (p *Plugin) WithNodeHook(hookPoint string, opt *NodeHookOption) *Plugin {
 }
 
 func (p *Plugin) WithCondition(condition string) *Plugin {
-	if err := cel.ValidateDomainHookCondition(condition); err != nil {
+	if err := cel.ValidateNodeHookCondition(condition); err != nil {
 		panic(fmt.Sprintf("invalid plugin-level CEL condition: %v", err))
 	}
 	p.condition = condition

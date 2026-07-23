@@ -29,18 +29,11 @@ type domainHookTmplData struct {
 }
 
 type nodeHookTmplData struct {
-	HookPoints      []string
+	HookPoint       string
 	Socket          string
 	Condition       string
 	FailureStrategy string
 	Timeout         string
-}
-
-type hookSidecar struct {
-	Image           string   `json:"image"`
-	ImagePullPolicy string   `json:"imagePullPolicy,omitempty"`
-	Command         []string `json:"command,omitempty"`
-	Args            []string `json:"args,omitempty"`
 }
 
 const pluginCRTmplStr = `apiVersion: plugin.kubevirt.io/v1alpha1
@@ -78,10 +71,7 @@ spec:
 {{- if .NodeHooks }}
   nodeHooks:
 {{- range .NodeHooks }}
-  - permittedHooks:
-{{- range .HookPoints }}
-    - {{ . }}
-{{- end }}
+  - hookPoint: {{ .HookPoint }}
     socket: {{ .Socket }}
 {{- if .Condition }}
     condition: "{{ .Condition }}"
@@ -116,10 +106,7 @@ spec:
 {{- end }}
       containers:
       - name: {{ .Name }}
-        image: {{ .Image }}
-{{- if .ImagePullPolicy }}
-        imagePullPolicy: {{ .ImagePullPolicy }}
-{{- end }}
+        image: quay.io/myorg/{{ .PluginName }}:latest
 {{- if .Args }}
         args:
 {{- range .Args }}
@@ -172,42 +159,36 @@ roleRef:
   apiGroup: rbac.authorization.k8s.io
 `
 
-const mapTmplStr = `apiVersion: admissionregistration.k8s.io/v1
+const mapTmplStr = `apiVersion: admissionregistration.k8s.io/v1alpha1
 kind: MutatingAdmissionPolicy
 metadata:
   name: {{ .Name }}
 spec:
+  failurePolicy: Fail
+  reinvocationPolicy: Never
   matchConstraints:
     resourceRules:
-    - apiGroups: ["kubevirt.io"]
-      apiVersions: ["*"]
-      resources: ["virtualmachineinstances"]
+    - apiGroups: [""]
+      apiVersions: ["v1"]
+      resources: ["pods"]
       operations: ["CREATE"]
-  paramKind:
-    apiVersion: plugin.kubevirt.io/v1alpha1
-    kind: Plugin
-  reinvocationPolicy: IfNeeded
+  matchConditions:
+  - name: is-virt-launcher-pod
+    expression: 'has(object.metadata.labels) && "kubevirt.io" in object.metadata.labels && object.metadata.labels["kubevirt.io"] == "virt-launcher"'
+  - name: has-plugin-socket-volume
+    expression: 'object.spec.volumes.exists(v, v.name == "{{ .PluginSocketsVolumeName }}")'
   mutations:
-  - patchType: ApplyConfiguration
-    applyConfiguration:
-      expression: |-
-        Object{
-          metadata: Object.metadata{
-            annotations: {
-              "hooks.kubevirt.io/hookSidecars": {{ .SidecarCEL }}
-            }
-          }
-        }
+  - patchType: JSONPatch
+    jsonPatch:
+      expression: {{ .JSONPatchExpression }}
 `
 
-const mapBindingTmplStr = `apiVersion: admissionregistration.k8s.io/v1
+const mapBindingTmplStr = `apiVersion: admissionregistration.k8s.io/v1alpha1
 kind: MutatingAdmissionPolicyBinding
 metadata:
   name: {{ .Name }}
 spec:
   policyName: {{ .PolicyName }}
-  paramRef:
-    name: {{ .ParamRefName }}
 `
 
 const dockerfileTmplStr = `FROM golang:{{ .GoVersion }} AS builder
@@ -237,12 +218,6 @@ push: build
 	$(CONTAINER_ENGINE) push $(IMAGE)
 `
 
-func celStringLiteral(s string) string {
-	s = strings.ReplaceAll(s, `\`, `\\`)
-	s = strings.ReplaceAll(s, `"`, `\"`)
-	return `"` + s + `"`
-}
-
 func (p *Plugin) WithRBACRules(rules []rbacv1.PolicyRule) *Plugin {
 	p.rbacRules = rules
 	return p
@@ -267,6 +242,7 @@ func (p *Plugin) generate(outputDir, sourceDir string) error {
 	}
 
 	nodeEntrypoints := p.uniqueNodeEntrypoints()
+	domainEntrypoints := p.uniqueDomainEntrypoints()
 
 	type artifact struct {
 		suffix  string
@@ -303,17 +279,26 @@ func (p *Plugin) generate(outputDir, sourceDir string) error {
 	yamlFiles = append(yamlFiles, artifact{"plugin.yaml", content})
 
 	if hasSidecarDomain {
-		content, err := p.renderMAP()
-		if err != nil {
-			return err
-		}
-		yamlFiles = append(yamlFiles, artifact{"mutating-admission-policy.yaml", content})
+		for _, entrypoint := range domainEntrypoints {
+			suffix := "mutating-admission-policy.yaml"
+			bindingSuffix := "mutating-admission-policy-binding.yaml"
+			if entrypoint != p.name {
+				suffix = entrypoint + "-mutating-admission-policy.yaml"
+				bindingSuffix = entrypoint + "-mutating-admission-policy-binding.yaml"
+			}
 
-		content, err = p.renderMAPBinding()
-		if err != nil {
-			return err
+			content, err := p.renderMAP(entrypoint)
+			if err != nil {
+				return err
+			}
+			yamlFiles = append(yamlFiles, artifact{suffix, content})
+
+			content, err = p.renderMAPBinding(entrypoint)
+			if err != nil {
+				return err
+			}
+			yamlFiles = append(yamlFiles, artifact{bindingSuffix, content})
 		}
-		yamlFiles = append(yamlFiles, artifact{"mutating-admission-policy-binding.yaml", content})
 	}
 
 	for i, file := range yamlFiles {
@@ -333,7 +318,7 @@ func (p *Plugin) generate(outputDir, sourceDir string) error {
 		if err != nil {
 			return err
 		}
-		if err := os.WriteFile(filepath.Join(outputDir, "Dockerfile"), []byte(dockerfileContent), 0644); err != nil {
+		if err := os.WriteFile(filepath.Join(sourceDir, "Dockerfile"), []byte(dockerfileContent), 0644); err != nil {
 			return fmt.Errorf("write Dockerfile: %w", err)
 		}
 
@@ -341,7 +326,7 @@ func (p *Plugin) generate(outputDir, sourceDir string) error {
 		if err != nil {
 			return err
 		}
-		if err := os.WriteFile(filepath.Join(outputDir, "Makefile"), []byte(makefileContent), 0644); err != nil {
+		if err := os.WriteFile(filepath.Join(sourceDir, "Makefile"), []byte(makefileContent), 0644); err != nil {
 			return fmt.Errorf("write Makefile: %w", err)
 		}
 	}
@@ -405,37 +390,20 @@ func (p *Plugin) renderPluginCR() (string, error) {
 		}
 	}
 
-	renderedNodeEntrypoints := map[string]bool{}
 	for _, nodeHook := range p.nodeHooks {
 		entrypoint := p.resolveEntrypoint(nodeHook.entrypoint)
-		if renderedNodeEntrypoints[entrypoint] {
-			continue
-		}
-		renderedNodeEntrypoints[entrypoint] = true
-
-		hooks := p.nodeHooksForEntrypoint(entrypoint)
-		if err := validateNodeHookConsistency(entrypoint, hooks); err != nil {
-			return "", err
-		}
-		first := hooks[0]
-
-		var hookPoints []string
-		for _, h := range hooks {
-			hookPoints = append(hookPoints, h.hookPoint)
-		}
-
 		nodeHookData := nodeHookTmplData{
-			HookPoints: hookPoints,
-			Socket:     NodeSocketPathForEntrypoint(p.name, entrypoint),
+			HookPoint: nodeHook.hookPoint,
+			Socket:    NodeSocketPathForEntrypoint(p.name, entrypoint),
 		}
-		if first.condition != "" {
-			nodeHookData.Condition = first.condition
+		if nodeHook.condition != "" {
+			nodeHookData.Condition = nodeHook.condition
 		}
-		if first.failureStrategy != nil {
-			nodeHookData.FailureStrategy = string(*first.failureStrategy)
+		if nodeHook.failureStrategy != nil {
+			nodeHookData.FailureStrategy = string(*nodeHook.failureStrategy)
 		}
-		if first.timeout != nil {
-			nodeHookData.Timeout = first.timeout.String()
+		if nodeHook.timeout != nil {
+			nodeHookData.Timeout = nodeHook.timeout.String()
 		}
 		data.NodeHooks = append(data.NodeHooks, nodeHookData)
 	}
@@ -449,19 +417,15 @@ func (p *Plugin) renderDaemonSet(entrypoint string) (string, error) {
 		name = p.name + "-" + entrypoint
 	}
 
-	image := p.resolveImage()
-
 	data := struct {
 		Name               string
-		Image              string
-		ImagePullPolicy    string
+		PluginName         string
 		ServiceAccountName string
 		Args               []string
 	}{
-		Name:  name,
-		Image: image,
+		Name:       name,
+		PluginName: p.name,
 	}
-	data.ImagePullPolicy = p.imagePullPolicy
 
 	if len(p.rbacRules) > 0 {
 		data.ServiceAccountName = p.name
@@ -490,44 +454,71 @@ func (p *Plugin) renderRBAC() (string, error) {
 	return renderTemplate(rbacTmplStr, data)
 }
 
-func (p *Plugin) renderMAP() (string, error) {
-	var sidecars []hookSidecar
-	for _, entrypoint := range p.uniqueDomainEntrypoints() {
-		sidecar := hookSidecar{Image: p.resolveImage()}
-		if p.imagePullPolicy != "" {
-			sidecar.ImagePullPolicy = p.imagePullPolicy
-		}
-		if entrypoint != p.name {
-			sidecar.Args = []string{"--entrypoint", entrypoint}
-		}
-		sidecars = append(sidecars, sidecar)
+func (p *Plugin) renderMAP(entrypoint string) (string, error) {
+	name := p.name
+	containerName := "plugin-sidecar-" + p.name
+	if entrypoint != p.name {
+		name = p.name + "-" + entrypoint
+		containerName = "plugin-sidecar-" + p.name + "-" + entrypoint
 	}
 
-	sidecarJSON, err := json.Marshal(sidecars)
-	if err != nil {
-		return "", fmt.Errorf("marshal sidecar config: %w", err)
+	var args string
+	if entrypoint != p.name {
+		args = fmt.Sprintf(`,
+            command: ["./plugin", "serve", "--entrypoint", %q]`, entrypoint)
 	}
+
+	jsonPatchExpr := fmt.Sprintf(`'[
+    JSONPatch{
+        op: "add",
+        path: "/spec/containers/-",
+        value: Object.spec.containers{
+            name: %q,
+            image: "SIDECAR_IMAGE:latest"%s,
+            securityContext: Object.spec.containers.securityContext{
+                allowPrivilegeEscalation: false,
+                runAsNonRoot: true,
+                seccompProfile: Object.spec.containers.securityContext.seccompProfile{
+                    type: "RuntimeDefault"
+                },
+                capabilities: Object.spec.containers.securityContext.capabilities{
+                    drop: ["ALL"]
+                }
+            },
+            volumeMounts: [Object.spec.containers.volumeMounts{
+                name: %q,
+                mountPath: "/var/run/kubevirt-plugin/%s/",
+                subPath: %q
+            }]
+        }
+    }
+]'`, containerName, args, PluginSocketsVolumeName, p.name, p.name)
 
 	data := struct {
-		Name       string
-		SidecarCEL string
+		Name                    string
+		PluginSocketsVolumeName string
+		JSONPatchExpression      string
 	}{
-		Name:       p.name,
-		SidecarCEL: celStringLiteral(string(sidecarJSON)),
+		Name:                    name,
+		PluginSocketsVolumeName: PluginSocketsVolumeName,
+		JSONPatchExpression:      jsonPatchExpr,
 	}
 
 	return renderTemplate(mapTmplStr, data)
 }
 
-func (p *Plugin) renderMAPBinding() (string, error) {
+func (p *Plugin) renderMAPBinding(entrypoint string) (string, error) {
+	name := p.name
+	if entrypoint != p.name {
+		name = p.name + "-" + entrypoint
+	}
+
 	data := struct {
-		Name         string
-		PolicyName   string
-		ParamRefName string
+		Name       string
+		PolicyName string
 	}{
-		Name:         p.name,
-		PolicyName:   p.name,
-		ParamRefName: p.name,
+		Name:       name,
+		PolicyName: name,
 	}
 
 	return renderTemplate(mapBindingTmplStr, data)
@@ -608,36 +599,6 @@ func validateDomainHookConsistency(entrypoint string, hooks []DomainHookOption) 
 		hookTimeout := hook.timeout
 		if (firstTimeout == nil) != (hookTimeout == nil) || (firstTimeout != nil && hookTimeout != nil && *firstTimeout != *hookTimeout) {
 			return fmt.Errorf("domain hooks sharing entrypoint %q have conflicting timeouts", entrypoint)
-		}
-	}
-
-	return nil
-}
-
-func validateNodeHookConsistency(entrypoint string, hooks []NodeHookOption) error {
-	if len(hooks) <= 1 {
-		return nil
-	}
-
-	first := hooks[0]
-	for i := 1; i < len(hooks); i++ {
-		hook := hooks[i]
-
-		if hook.condition != first.condition {
-			return fmt.Errorf("node hooks sharing entrypoint %q have conflicting conditions: %q vs %q",
-				entrypoint, first.condition, hook.condition)
-		}
-
-		firstFailureStrategy := first.failureStrategy
-		hookFailureStrategy := hook.failureStrategy
-		if (firstFailureStrategy == nil) != (hookFailureStrategy == nil) || (firstFailureStrategy != nil && hookFailureStrategy != nil && *firstFailureStrategy != *hookFailureStrategy) {
-			return fmt.Errorf("node hooks sharing entrypoint %q have conflicting failure strategies", entrypoint)
-		}
-
-		firstTimeout := first.timeout
-		hookTimeout := hook.timeout
-		if (firstTimeout == nil) != (hookTimeout == nil) || (firstTimeout != nil && hookTimeout != nil && *firstTimeout != *hookTimeout) {
-			return fmt.Errorf("node hooks sharing entrypoint %q have conflicting timeouts", entrypoint)
 		}
 	}
 

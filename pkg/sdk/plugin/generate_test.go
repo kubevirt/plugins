@@ -1,7 +1,6 @@
 package plugin
 
 import (
-	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -35,11 +34,11 @@ type testPluginCR struct {
 			Timeout         string `yaml:"timeout,omitempty"`
 		} `yaml:"domainHooks,omitempty"`
 		NodeHooks []struct {
-			PermittedHooks  []string `yaml:"permittedHooks"`
-			Socket          string   `yaml:"socket"`
-			Condition       string   `yaml:"condition,omitempty"`
-			FailureStrategy string   `yaml:"failureStrategy,omitempty"`
-			Timeout         string   `yaml:"timeout,omitempty"`
+			HookPoint       string `yaml:"hookPoint"`
+			Socket          string `yaml:"socket"`
+			Condition       string `yaml:"condition,omitempty"`
+			FailureStrategy string `yaml:"failureStrategy,omitempty"`
+			Timeout         string `yaml:"timeout,omitempty"`
 		} `yaml:"nodeHooks,omitempty"`
 	} `yaml:"spec"`
 }
@@ -128,7 +127,9 @@ type testMAP struct {
 		Name string `yaml:"name"`
 	} `yaml:"metadata"`
 	Spec struct {
-		MatchConstraints struct {
+		FailurePolicy      string `yaml:"failurePolicy"`
+		ReinvocationPolicy string `yaml:"reinvocationPolicy"`
+		MatchConstraints   struct {
 			ResourceRules []struct {
 				APIGroups   []string `yaml:"apiGroups"`
 				APIVersions []string `yaml:"apiVersions"`
@@ -136,12 +137,16 @@ type testMAP struct {
 				Operations  []string `yaml:"operations"`
 			} `yaml:"resourceRules"`
 		} `yaml:"matchConstraints"`
-		ParamKind struct {
-			APIVersion string `yaml:"apiVersion"`
-			Kind       string `yaml:"kind"`
-		} `yaml:"paramKind"`
-		ReinvocationPolicy string                `yaml:"reinvocationPolicy"`
-		Mutations          []testMAPMutation     `yaml:"mutations,omitempty"`
+		MatchConditions []struct {
+			Name       string `yaml:"name"`
+			Expression string `yaml:"expression"`
+		} `yaml:"matchConditions"`
+		Mutations []struct {
+			PatchType string `yaml:"patchType"`
+			JSONPatch struct {
+				Expression string `yaml:"expression"`
+			} `yaml:"jsonPatch"`
+		} `yaml:"mutations"`
 	} `yaml:"spec"`
 }
 
@@ -153,17 +158,7 @@ type testMAPBinding struct {
 	} `yaml:"metadata"`
 	Spec struct {
 		PolicyName string `yaml:"policyName"`
-		ParamRef   struct {
-			Name string `yaml:"name"`
-		} `yaml:"paramRef"`
 	} `yaml:"spec"`
-}
-
-type testMAPMutation struct {
-	PatchType          string `yaml:"patchType"`
-	ApplyConfiguration struct {
-		Expression string `yaml:"expression"`
-	} `yaml:"applyConfiguration"`
 }
 
 // Helpers
@@ -291,8 +286,8 @@ func TestGeneratePluginCRNodeHookOnly(t *testing.T) {
 		t.Fatalf("expected 1 nodeHook, got %d", len(cr.Spec.NodeHooks))
 	}
 
-	if len(cr.Spec.NodeHooks[0].PermittedHooks) != 1 || cr.Spec.NodeHooks[0].PermittedHooks[0] != PreVMStart {
-		t.Fatalf("expected permittedHooks [%q], got %v", PreVMStart, cr.Spec.NodeHooks[0].PermittedHooks)
+	if cr.Spec.NodeHooks[0].HookPoint != PreVMStart {
+		t.Fatalf("expected hookPoint %q, got %q", PreVMStart, cr.Spec.NodeHooks[0].HookPoint)
 	}
 
 	if cr.Spec.NodeHooks[0].Socket != "/var/run/kubevirt/plugins/test-plugin/node.sock" {
@@ -301,37 +296,6 @@ func TestGeneratePluginCRNodeHookOnly(t *testing.T) {
 
 	if len(cr.Spec.DomainHooks) != 0 {
 		t.Fatal("expected no domainHooks")
-	}
-}
-
-func TestGenerateNodeHookMultipleHookPointsSameEntrypoint(t *testing.T) {
-	sourceDir := setupSourceDir(t)
-	outputDir := filepath.Join(t.TempDir(), "deploy")
-
-	p := New("test-plugin").
-		WithNodeHook(PreVMStart, NodeHandler(&stubNodeHandler{})).
-		WithNodeHook(PostVMStop, NodeHandler(&stubNodeHandler{}))
-	if err := p.generate(outputDir, sourceDir); err != nil {
-		t.Fatal(err)
-	}
-
-	var cr testPluginCR
-	readAndUnmarshal(t, findGeneratedFile(t, outputDir, "plugin.yaml"), &cr)
-
-	if len(cr.Spec.NodeHooks) != 1 {
-		t.Fatalf("expected 1 nodeHook entry (grouped), got %d", len(cr.Spec.NodeHooks))
-	}
-
-	if len(cr.Spec.NodeHooks[0].PermittedHooks) != 2 {
-		t.Fatalf("expected 2 permittedHooks, got %d", len(cr.Spec.NodeHooks[0].PermittedHooks))
-	}
-
-	if cr.Spec.NodeHooks[0].PermittedHooks[0] != PreVMStart {
-		t.Fatalf("expected first hook point %q, got %q", PreVMStart, cr.Spec.NodeHooks[0].PermittedHooks[0])
-	}
-
-	if cr.Spec.NodeHooks[0].PermittedHooks[1] != PostVMStop {
-		t.Fatalf("expected second hook point %q, got %q", PostVMStop, cr.Spec.NodeHooks[0].PermittedHooks[1])
 	}
 }
 
@@ -389,7 +353,7 @@ func TestGeneratePluginCRWithCondition(t *testing.T) {
 
 	p := New("test-plugin").
 		WithNodeHook(PreVMStart, NodeHandler(&stubNodeHandler{})).
-		WithCondition("vmi.labels.gpu == 'true'")
+		WithCondition("vmi.metadata.name == 'test'")
 	if err := p.generate(outputDir, sourceDir); err != nil {
 		t.Fatal(err)
 	}
@@ -397,7 +361,7 @@ func TestGeneratePluginCRWithCondition(t *testing.T) {
 	var cr testPluginCR
 	readAndUnmarshal(t, findGeneratedFile(t, outputDir, "plugin.yaml"), &cr)
 
-	if cr.Spec.Condition != "vmi.labels.gpu == 'true'" {
+	if cr.Spec.Condition != "vmi.metadata.name == 'test'" {
 		t.Fatalf("expected condition, got %q", cr.Spec.Condition)
 	}
 }
@@ -665,8 +629,8 @@ func TestGenerateMAP(t *testing.T) {
 	var m testMAP
 	readAndUnmarshal(t, findGeneratedFile(t, outputDir, "mutating-admission-policy.yaml"), &m)
 
-	if m.APIVersion != "admissionregistration.k8s.io/v1" {
-		t.Fatalf("expected apiVersion admissionregistration.k8s.io/v1, got %q", m.APIVersion)
+	if m.APIVersion != "admissionregistration.k8s.io/v1alpha1" {
+		t.Fatalf("expected apiVersion admissionregistration.k8s.io/v1alpha1, got %q", m.APIVersion)
 	}
 
 	if m.Kind != "MutatingAdmissionPolicy" {
@@ -677,16 +641,54 @@ func TestGenerateMAP(t *testing.T) {
 		t.Fatalf("expected name test-plugin, got %q", m.Metadata.Name)
 	}
 
-	if m.Spec.ReinvocationPolicy != "IfNeeded" {
-		t.Fatalf("expected reinvocationPolicy IfNeeded, got %q", m.Spec.ReinvocationPolicy)
+	if m.Spec.FailurePolicy != "Fail" {
+		t.Fatalf("expected failurePolicy Fail, got %q", m.Spec.FailurePolicy)
 	}
 
-	if m.Spec.ParamKind.APIVersion != "plugin.kubevirt.io/v1alpha1" {
-		t.Fatalf("expected paramKind apiVersion, got %q", m.Spec.ParamKind.APIVersion)
+	if m.Spec.ReinvocationPolicy != "Never" {
+		t.Fatalf("expected reinvocationPolicy Never, got %q", m.Spec.ReinvocationPolicy)
 	}
 
-	if m.Spec.ParamKind.Kind != "Plugin" {
-		t.Fatalf("expected paramKind kind Plugin, got %q", m.Spec.ParamKind.Kind)
+	if len(m.Spec.MatchConstraints.ResourceRules) != 1 {
+		t.Fatalf("expected 1 resource rule, got %d", len(m.Spec.MatchConstraints.ResourceRules))
+	}
+
+	rule := m.Spec.MatchConstraints.ResourceRules[0]
+	if rule.Resources[0] != "pods" {
+		t.Fatalf("expected resource pods, got %v", rule.Resources)
+	}
+
+	if len(m.Spec.MatchConditions) != 2 {
+		t.Fatalf("expected 2 matchConditions, got %d", len(m.Spec.MatchConditions))
+	}
+
+	if m.Spec.MatchConditions[0].Name != "is-virt-launcher-pod" {
+		t.Fatalf("expected matchCondition name is-virt-launcher-pod, got %q", m.Spec.MatchConditions[0].Name)
+	}
+
+	if m.Spec.MatchConditions[1].Name != "has-plugin-socket-volume" {
+		t.Fatalf("expected matchCondition name has-plugin-socket-volume, got %q", m.Spec.MatchConditions[1].Name)
+	}
+
+	if len(m.Spec.Mutations) != 1 {
+		t.Fatalf("expected 1 mutation, got %d", len(m.Spec.Mutations))
+	}
+
+	if m.Spec.Mutations[0].PatchType != "JSONPatch" {
+		t.Fatalf("expected patchType JSONPatch, got %q", m.Spec.Mutations[0].PatchType)
+	}
+
+	expr := m.Spec.Mutations[0].JSONPatch.Expression
+	if !strings.Contains(expr, "plugin-sidecar-test-plugin") {
+		t.Fatalf("expected JSONPatch expression to contain container name, got:\n%s", expr)
+	}
+
+	if !strings.Contains(expr, "kubevirt-plugin-sockets") {
+		t.Fatalf("expected JSONPatch expression to contain volume name, got:\n%s", expr)
+	}
+
+	if !strings.Contains(expr, "/var/run/kubevirt-plugin/test-plugin/") {
+		t.Fatalf("expected JSONPatch expression to contain mountPath, got:\n%s", expr)
 	}
 }
 
@@ -709,10 +711,6 @@ func TestGenerateMAPBinding(t *testing.T) {
 	if mb.Spec.PolicyName != "test-plugin" {
 		t.Fatalf("expected policyName test-plugin, got %q", mb.Spec.PolicyName)
 	}
-
-	if mb.Spec.ParamRef.Name != "test-plugin" {
-		t.Fatalf("expected paramRef name test-plugin, got %q", mb.Spec.ParamRef.Name)
-	}
 }
 
 func TestGenerateDockerfile(t *testing.T) {
@@ -724,7 +722,7 @@ func TestGenerateDockerfile(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	content := readFileContent(t, filepath.Join(outputDir, "Dockerfile"))
+	content := readFileContent(t, filepath.Join(sourceDir, "Dockerfile"))
 
 	if !strings.Contains(content, "FROM golang:1.23.0 AS builder") {
 		t.Fatalf("expected Dockerfile to contain Go version 1.23.0, got:\n%s", content)
@@ -744,7 +742,7 @@ func TestGenerateMakefile(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	content := readFileContent(t, filepath.Join(outputDir, "Makefile"))
+	content := readFileContent(t, filepath.Join(sourceDir, "Makefile"))
 
 	if !strings.Contains(content, "test-plugin") {
 		t.Fatalf("expected Makefile to contain plugin name, got:\n%s", content)
@@ -800,24 +798,28 @@ func TestGenerateFileNumbering(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	expectedFiles := []string{
+	expectedYAML := []string{
 		"01-rbac.yaml",
 		"02-daemonset.yaml",
 		"03-plugin.yaml",
 		"04-mutating-admission-policy.yaml",
 		"05-mutating-admission-policy-binding.yaml",
-		"Dockerfile",
-		"Makefile",
 	}
 
 	files := listFileNames(outputDir)
-	if len(files) != len(expectedFiles) {
-		t.Fatalf("expected %d files in output dir, got %d: %v", len(expectedFiles), len(files), files)
+	if len(files) != len(expectedYAML) {
+		t.Fatalf("expected %d YAML files in output dir, got %d: %v", len(expectedYAML), len(files), files)
 	}
 
-	for i, name := range expectedFiles {
+	for i, name := range expectedYAML {
 		if files[i] != name {
 			t.Fatalf("file %d: expected %q, got %q (all files: %v)", i, name, files[i], files)
+		}
+	}
+
+	for _, name := range []string{"Dockerfile", "Makefile"} {
+		if _, err := os.Stat(filepath.Join(sourceDir, name)); os.IsNotExist(err) {
+			t.Fatalf("expected %s in source dir %s", name, sourceDir)
 		}
 	}
 }
@@ -938,38 +940,32 @@ func TestGenerateMultiEntrypointMAPs(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Single MAP for all entrypoints
-	var m testMAP
-	readAndUnmarshal(t, findGeneratedFile(t, outputDir, "mutating-admission-policy.yaml"), &m)
+	var mapA testMAP
+	readAndUnmarshal(t, findGeneratedFile(t, outputDir, "ep-a-mutating-admission-policy.yaml"), &mapA)
 
-	if m.Metadata.Name != "test-plugin" {
-		t.Fatalf("expected single MAP named 'test-plugin', got %q", m.Metadata.Name)
+	if mapA.Metadata.Name != "test-plugin-ep-a" {
+		t.Fatalf("expected MAP name 'test-plugin-ep-a', got %q", mapA.Metadata.Name)
 	}
 
-	// No per-entrypoint MAP files should exist
-	if generatedFileExists(outputDir, "ep-a-mutating-admission-policy.yaml") {
-		t.Fatal("expected no per-entrypoint MAP files")
+	var mapB testMAP
+	readAndUnmarshal(t, findGeneratedFile(t, outputDir, "ep-b-mutating-admission-policy.yaml"), &mapB)
+
+	if mapB.Metadata.Name != "test-plugin-ep-b" {
+		t.Fatalf("expected MAP name 'test-plugin-ep-b', got %q", mapB.Metadata.Name)
 	}
 
-	if generatedFileExists(outputDir, "ep-b-mutating-admission-policy.yaml") {
-		t.Fatal("expected no per-entrypoint MAP files")
+	var bindingA testMAPBinding
+	readAndUnmarshal(t, findGeneratedFile(t, outputDir, "ep-a-mutating-admission-policy-binding.yaml"), &bindingA)
+
+	if bindingA.Spec.PolicyName != "test-plugin-ep-a" {
+		t.Fatalf("expected binding policyName 'test-plugin-ep-a', got %q", bindingA.Spec.PolicyName)
 	}
 
-	// Single binding
-	var mb testMAPBinding
-	readAndUnmarshal(t, findGeneratedFile(t, outputDir, "mutating-admission-policy-binding.yaml"), &mb)
+	var bindingB testMAPBinding
+	readAndUnmarshal(t, findGeneratedFile(t, outputDir, "ep-b-mutating-admission-policy-binding.yaml"), &bindingB)
 
-	if mb.Spec.PolicyName != "test-plugin" {
-		t.Fatalf("expected binding policyName 'test-plugin', got %q", mb.Spec.PolicyName)
-	}
-
-	if mb.Spec.ParamRef.Name != "test-plugin" {
-		t.Fatalf("expected paramRef name 'test-plugin', got %q", mb.Spec.ParamRef.Name)
-	}
-
-	// No per-entrypoint binding files
-	if generatedFileExists(outputDir, "ep-a-mutating-admission-policy-binding.yaml") {
-		t.Fatal("expected no per-entrypoint binding files")
+	if bindingB.Spec.PolicyName != "test-plugin-ep-b" {
+		t.Fatalf("expected binding policyName 'test-plugin-ep-b', got %q", bindingB.Spec.PolicyName)
 	}
 }
 
@@ -1067,14 +1063,6 @@ func TestGenerateSingleEntrypointBackwardCompat(t *testing.T) {
 	if m.Metadata.Name != "test-plugin" {
 		t.Fatalf("expected MAP name 'test-plugin', got %q", m.Metadata.Name)
 	}
-
-	if len(m.Spec.Mutations) != 1 {
-		t.Fatalf("expected 1 mutation, got %d", len(m.Spec.Mutations))
-	}
-
-	if m.Spec.Mutations[0].PatchType != "ApplyConfiguration" {
-		t.Fatalf("expected patchType ApplyConfiguration, got %q", m.Spec.Mutations[0].PatchType)
-	}
 }
 
 func TestGenerateDefaultEntrypointNoArgsSuffix(t *testing.T) {
@@ -1101,8 +1089,8 @@ func TestGenerateConflictingDomainHooksSameEntrypoint(t *testing.T) {
 
 	t.Run("conflicting conditions", func(t *testing.T) {
 		p := New("test-plugin").
-			WithDomainHook(ForLibvirt(&stubDomainHandler{}).WithCondition("vmi.metadata.name == 'a'")).
-			WithDomainHook(ForLibvirt(&stubDomainHandler{}).WithCondition("vmi.metadata.name == 'b'"))
+			WithDomainHook(ForLibvirt(&stubDomainHandler{}).WithCondition("vmi.Name == 'a'")).
+			WithDomainHook(ForLibvirt(&stubDomainHandler{}).WithCondition("vmi.Name == 'b'"))
 		err := p.generate(outputDir, sourceDir)
 		if err == nil {
 			t.Fatal("expected error for conflicting conditions")
@@ -1142,63 +1130,6 @@ func TestGenerateConflictingDomainHooksSameEntrypoint(t *testing.T) {
 		p := New("test-plugin").
 			WithDomainHook(ForLibvirt(&stubDomainHandler{}).WithTimeout(10 * time.Second)).
 			WithDomainHook(ForLibvirt(&stubDomainHandler{}))
-		err := p.generate(outputDir, sourceDir)
-		if err == nil {
-			t.Fatal("expected error when one hook has timeout and another does not")
-		}
-		if !strings.Contains(err.Error(), "conflicting timeouts") {
-			t.Fatalf("expected conflicting timeouts error, got: %v", err)
-		}
-	})
-}
-
-func TestGenerateConflictingNodeHooksSameEntrypoint(t *testing.T) {
-	sourceDir := setupSourceDir(t)
-	outputDir := filepath.Join(t.TempDir(), "deploy")
-
-	t.Run("conflicting conditions", func(t *testing.T) {
-		p := New("test-plugin").
-			WithNodeHook(PreVMStart, NodeHandler(&stubNodeHandler{}).WithCondition("vmi.metadata.name == 'a'")).
-			WithNodeHook(PostVMStop, NodeHandler(&stubNodeHandler{}).WithCondition("vmi.metadata.name == 'b'"))
-		err := p.generate(outputDir, sourceDir)
-		if err == nil {
-			t.Fatal("expected error for conflicting conditions")
-		}
-		if !strings.Contains(err.Error(), "conflicting conditions") {
-			t.Fatalf("expected conflicting conditions error, got: %v", err)
-		}
-	})
-
-	t.Run("conflicting timeouts", func(t *testing.T) {
-		p := New("test-plugin").
-			WithNodeHook(PreVMStart, NodeHandler(&stubNodeHandler{}).WithTimeout(10 * time.Second)).
-			WithNodeHook(PostVMStop, NodeHandler(&stubNodeHandler{}).WithTimeout(30 * time.Second))
-		err := p.generate(outputDir, sourceDir)
-		if err == nil {
-			t.Fatal("expected error for conflicting timeouts")
-		}
-		if !strings.Contains(err.Error(), "conflicting timeouts") {
-			t.Fatalf("expected conflicting timeouts error, got: %v", err)
-		}
-	})
-
-	t.Run("conflicting failure strategies", func(t *testing.T) {
-		p := New("test-plugin").
-			WithNodeHook(PreVMStart, NodeHandler(&stubNodeHandler{}).WithFailureStrategy(Fail)).
-			WithNodeHook(PostVMStop, NodeHandler(&stubNodeHandler{}).WithFailureStrategy(Ignore))
-		err := p.generate(outputDir, sourceDir)
-		if err == nil {
-			t.Fatal("expected error for conflicting failure strategies")
-		}
-		if !strings.Contains(err.Error(), "conflicting failure strategies") {
-			t.Fatalf("expected conflicting failure strategies error, got: %v", err)
-		}
-	})
-
-	t.Run("one set one unset timeout", func(t *testing.T) {
-		p := New("test-plugin").
-			WithNodeHook(PreVMStart, NodeHandler(&stubNodeHandler{}).WithTimeout(10 * time.Second)).
-			WithNodeHook(PostVMStop, NodeHandler(&stubNodeHandler{}))
 		err := p.generate(outputDir, sourceDir)
 		if err == nil {
 			t.Fatal("expected error when one hook has timeout and another does not")
@@ -1255,7 +1186,7 @@ func TestGeneratePluginCRCELDomainHookOnly(t *testing.T) {
 	sourceDir := setupSourceDir(t)
 	outputDir := filepath.Join(t.TempDir(), "deploy")
 
-	p := New("test-plugin").WithDomainCELHook("domain.name == 'test'")
+	p := New("test-plugin").WithDomainCELHook("Domain{Name: 'test'}")
 	if err := p.generate(outputDir, sourceDir); err != nil {
 		t.Fatal(err)
 	}
@@ -1271,7 +1202,7 @@ func TestGeneratePluginCRCELDomainHookOnly(t *testing.T) {
 		t.Fatal("expected CEL domain hook")
 	}
 
-	if cr.Spec.DomainHooks[0].CEL.Expression != "domain.name == 'test'" {
+	if cr.Spec.DomainHooks[0].CEL.Expression != "Domain{Name: 'test'}" {
 		t.Fatalf("expected expression, got %q", cr.Spec.DomainHooks[0].CEL.Expression)
 	}
 
@@ -1285,8 +1216,8 @@ func TestGenerateMultipleCELDomainHooks(t *testing.T) {
 	outputDir := filepath.Join(t.TempDir(), "deploy")
 
 	p := New("test-plugin").
-		WithDomainCELHook("domain.name == 'a'").
-		WithDomainCELHook("domain.name == 'b'")
+		WithDomainCELHook("Domain{Name: 'a'}").
+		WithDomainCELHook("Domain{Name: 'b'}")
 	if err := p.generate(outputDir, sourceDir); err != nil {
 		t.Fatal(err)
 	}
@@ -1298,11 +1229,11 @@ func TestGenerateMultipleCELDomainHooks(t *testing.T) {
 		t.Fatalf("expected 2 domainHooks, got %d", len(cr.Spec.DomainHooks))
 	}
 
-	if cr.Spec.DomainHooks[0].CEL == nil || cr.Spec.DomainHooks[0].CEL.Expression != "domain.name == 'a'" {
+	if cr.Spec.DomainHooks[0].CEL == nil || cr.Spec.DomainHooks[0].CEL.Expression != "Domain{Name: 'a'}" {
 		t.Fatalf("expected first CEL expression, got %+v", cr.Spec.DomainHooks[0])
 	}
 
-	if cr.Spec.DomainHooks[1].CEL == nil || cr.Spec.DomainHooks[1].CEL.Expression != "domain.name == 'b'" {
+	if cr.Spec.DomainHooks[1].CEL == nil || cr.Spec.DomainHooks[1].CEL.Expression != "Domain{Name: 'b'}" {
 		t.Fatalf("expected second CEL expression, got %+v", cr.Spec.DomainHooks[1])
 	}
 }
@@ -1312,7 +1243,7 @@ func TestGenerateCELFirstSidecarSecondOrder(t *testing.T) {
 	outputDir := filepath.Join(t.TempDir(), "deploy")
 
 	p := New("test-plugin").
-		WithDomainCELHook("domain.name == 'cel-first'").
+		WithDomainCELHook("Domain{Name: 'cel-first'}").
 		WithDomainHook(ForLibvirt(&stubDomainHandler{}))
 	if err := p.generate(outputDir, sourceDir); err != nil {
 		t.Fatal(err)
@@ -1341,7 +1272,7 @@ func TestGenerateCELDomainHookWithNodeHook(t *testing.T) {
 	outputDir := filepath.Join(t.TempDir(), "deploy")
 
 	p := New("test-plugin").
-		WithDomainCELHook("domain.name == 'test'").
+		WithDomainCELHook("Domain{Name: 'test'}").
 		WithNodeHook(PreVMStart, NodeHandler(&stubNodeHandler{}))
 	if err := p.generate(outputDir, sourceDir); err != nil {
 		t.Fatal(err)
@@ -1371,7 +1302,7 @@ func TestGenerateCELDomainHookWithNodeHook(t *testing.T) {
 	}
 
 	// Dockerfile should be generated (node hook needs container)
-	if _, err := os.Stat(filepath.Join(outputDir, "Dockerfile")); os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(sourceDir, "Dockerfile")); os.IsNotExist(err) {
 		t.Fatal("expected Dockerfile for node hook plugin")
 	}
 }
@@ -1380,16 +1311,16 @@ func TestGenerateCELOnlyNoDockerfile(t *testing.T) {
 	sourceDir := setupSourceDir(t)
 	outputDir := filepath.Join(t.TempDir(), "deploy")
 
-	p := New("test-plugin").WithDomainCELHook("domain.name == 'test'")
+	p := New("test-plugin").WithDomainCELHook("Domain{Name: 'test'}")
 	if err := p.generate(outputDir, sourceDir); err != nil {
 		t.Fatal(err)
 	}
 
-	if _, err := os.Stat(filepath.Join(outputDir, "Dockerfile")); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(sourceDir, "Dockerfile")); !os.IsNotExist(err) {
 		t.Fatal("CEL-only plugin should not generate Dockerfile")
 	}
 
-	if _, err := os.Stat(filepath.Join(outputDir, "Makefile")); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(sourceDir, "Makefile")); !os.IsNotExist(err) {
 		t.Fatal("CEL-only plugin should not generate Makefile")
 	}
 }
@@ -1398,7 +1329,7 @@ func TestGenerateCELOnlyNoMAP(t *testing.T) {
 	sourceDir := setupSourceDir(t)
 	outputDir := filepath.Join(t.TempDir(), "deploy")
 
-	p := New("test-plugin").WithDomainCELHook("domain.name == 'test'")
+	p := New("test-plugin").WithDomainCELHook("Domain{Name: 'test'}")
 	if err := p.generate(outputDir, sourceDir); err != nil {
 		t.Fatal(err)
 	}
@@ -1418,7 +1349,7 @@ func TestGenerateMixedSidecarAndCEL(t *testing.T) {
 
 	p := New("test-plugin").
 		WithDomainHook(ForLibvirt(&stubDomainHandler{})).
-		WithDomainCELHook("domain.name == 'mutated'")
+		WithDomainCELHook("Domain{Name: 'mutated'}")
 	if err := p.generate(outputDir, sourceDir); err != nil {
 		t.Fatal(err)
 	}
@@ -1438,7 +1369,7 @@ func TestGenerateMixedSidecarAndCEL(t *testing.T) {
 		t.Fatal("expected second hook to be CEL")
 	}
 
-	if cr.Spec.DomainHooks[1].CEL.Expression != "domain.name == 'mutated'" {
+	if cr.Spec.DomainHooks[1].CEL.Expression != "Domain{Name: 'mutated'}" {
 		t.Fatalf("expected CEL expression, got %q", cr.Spec.DomainHooks[1].CEL.Expression)
 	}
 
@@ -1452,8 +1383,8 @@ func TestGenerateCELWithPerHookSettings(t *testing.T) {
 
 	timeout := 30 * time.Second
 	p := New("test-plugin").WithDomainHook(
-		CELDomainHook("domain.name == 'test'").
-			WithCondition("vmi.metadata.name == 'my-vmi'").
+		CELDomainHook("Domain{Name: 'test'}").
+			WithCondition("vmi.Name == 'my-vmi'").
 			WithFailureStrategy(Ignore).
 			WithTimeout(timeout),
 	)
@@ -1470,7 +1401,7 @@ func TestGenerateCELWithPerHookSettings(t *testing.T) {
 
 	hook := cr.Spec.DomainHooks[0]
 
-	if hook.Condition != "vmi.metadata.name == 'my-vmi'" {
+	if hook.Condition != "vmi.Name == 'my-vmi'" {
 		t.Fatalf("expected condition, got %q", hook.Condition)
 	}
 
@@ -1487,7 +1418,7 @@ func TestGenerateCELExpressionWithDoubleQuotes(t *testing.T) {
 	sourceDir := setupSourceDir(t)
 	outputDir := filepath.Join(t.TempDir(), "deploy")
 
-	expr := `domain.metadata.annotations["key"] == "value"`
+	expr := `Domain{Title: "test"}`
 	p := New("test-plugin").WithDomainCELHook(expr)
 	if err := p.generate(outputDir, sourceDir); err != nil {
 		t.Fatal(err)
@@ -1502,224 +1433,5 @@ func TestGenerateCELExpressionWithDoubleQuotes(t *testing.T) {
 
 	if cr.Spec.DomainHooks[0].CEL.Expression != expr {
 		t.Fatalf("expected expression to round-trip, got %q", cr.Spec.DomainHooks[0].CEL.Expression)
-	}
-}
-
-func TestCelStringLiteral(t *testing.T) {
-	tests := []struct {
-		name     string
-		input    string
-		expected string
-	}{
-		{"simple", `hello`, `"hello"`},
-		{"with double quotes", `say "hi"`, `"say \"hi\""`},
-		{"with backslash", `path\to`, `"path\\to"`},
-		{"backslash before quote", `a\"b`, `"a\\\"b"`},
-		{"json payload", `[{"image":"test:latest"}]`, `"[{\"image\":\"test:latest\"}]"`},
-		{"empty", ``, `""`},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			result := celStringLiteral(tt.input)
-			if result != tt.expected {
-				t.Fatalf("celStringLiteral(%q) = %q, want %q", tt.input, result, tt.expected)
-			}
-		})
-	}
-}
-
-func TestGenerateMAPMutations(t *testing.T) {
-	sourceDir := setupSourceDir(t)
-	outputDir := filepath.Join(t.TempDir(), "deploy")
-
-	p := New("test-plugin").WithDomainHook(ForLibvirt(&stubDomainHandler{}))
-	if err := p.generate(outputDir, sourceDir); err != nil {
-		t.Fatal(err)
-	}
-
-	mapFile := findGeneratedFile(t, outputDir, "mutating-admission-policy.yaml")
-	content := readFileContent(t, mapFile)
-
-	if !strings.Contains(content, "mutations:") {
-		t.Fatalf("expected MAP to contain mutations field, got:\n%s", content)
-	}
-
-	if !strings.Contains(content, "patchType: ApplyConfiguration") {
-		t.Fatalf("expected patchType ApplyConfiguration, got:\n%s", content)
-	}
-
-	if !strings.Contains(content, "hooks.kubevirt.io/hookSidecars") {
-		t.Fatalf("expected hookSidecars annotation in expression, got:\n%s", content)
-	}
-
-	if !strings.Contains(content, "quay.io/myorg/test-plugin:latest") {
-		t.Fatalf("expected default image in sidecar annotation, got:\n%s", content)
-	}
-}
-
-func TestGenerateMAPMutationsWithCustomImage(t *testing.T) {
-	sourceDir := setupSourceDir(t)
-	outputDir := filepath.Join(t.TempDir(), "deploy")
-
-	p := New("test-plugin").
-		WithImage("registry.example.com/my-plugin:v1.0").
-		WithDomainHook(ForLibvirt(&stubDomainHandler{}))
-	if err := p.generate(outputDir, sourceDir); err != nil {
-		t.Fatal(err)
-	}
-
-	content := readFileContent(t, findGeneratedFile(t, outputDir, "mutating-admission-policy.yaml"))
-
-	if !strings.Contains(content, "registry.example.com/my-plugin:v1.0") {
-		t.Fatalf("expected custom image in MAP mutations, got:\n%s", content)
-	}
-
-	if strings.Contains(content, "quay.io/myorg") {
-		t.Fatalf("expected no default image when custom image set, got:\n%s", content)
-	}
-}
-
-func TestGenerateMAPMutationsMultiEntrypoint(t *testing.T) {
-	sourceDir := setupSourceDir(t)
-	outputDir := filepath.Join(t.TempDir(), "deploy")
-
-	p := New("test-plugin").
-		WithDomainHook(ForLibvirt(&stubDomainHandler{}).WithEntrypoint("ep-a")).
-		WithDomainHook(ForLibvirt(&stubDomainHandler{}).WithEntrypoint("ep-b"))
-	if err := p.generate(outputDir, sourceDir); err != nil {
-		t.Fatal(err)
-	}
-
-	content := readFileContent(t, findGeneratedFile(t, outputDir, "mutating-admission-policy.yaml"))
-
-	if !strings.Contains(content, "--entrypoint") {
-		t.Fatalf("expected --entrypoint args in multi-entrypoint MAP, got:\n%s", content)
-	}
-
-	if !strings.Contains(content, "ep-a") {
-		t.Fatalf("expected ep-a in MAP mutations, got:\n%s", content)
-	}
-
-	if !strings.Contains(content, "ep-b") {
-		t.Fatalf("expected ep-b in MAP mutations, got:\n%s", content)
-	}
-}
-
-func TestGenerateMAPMutationsJSONRoundTrip(t *testing.T) {
-	sourceDir := setupSourceDir(t)
-	outputDir := filepath.Join(t.TempDir(), "deploy")
-
-	p := New("test-plugin").
-		WithImage("registry.example.com/my-plugin:v1.0").
-		WithImagePullPolicy("Always").
-		WithDomainHook(ForLibvirt(&stubDomainHandler{}).WithEntrypoint("ep-a")).
-		WithDomainHook(ForLibvirt(&stubDomainHandler{}).WithEntrypoint("ep-b"))
-	if err := p.generate(outputDir, sourceDir); err != nil {
-		t.Fatal(err)
-	}
-
-	content := readFileContent(t, findGeneratedFile(t, outputDir, "mutating-admission-policy.yaml"))
-
-	// Extract the CEL string value from the expression
-	// The annotation value is between the first and last escaped quotes on the hookSidecars line
-	lines := strings.Split(content, "\n")
-	var annotationLine string
-	for _, line := range lines {
-		if strings.Contains(line, "hooks.kubevirt.io/hookSidecars") {
-			annotationLine = strings.TrimSpace(line)
-			break
-		}
-	}
-
-	if annotationLine == "" {
-		t.Fatal("could not find hookSidecars annotation line")
-	}
-
-	// Extract JSON from CEL: the line looks like:
-	// "hooks.kubevirt.io/hookSidecars": "[{\"image\":\"...\"}]"
-	// Find the second ": " and extract the CEL string value
-	colonIdx := strings.Index(annotationLine, `": `)
-	if colonIdx < 0 {
-		t.Fatalf("could not find colon separator in annotation line: %s", annotationLine)
-	}
-	celValue := strings.TrimSpace(annotationLine[colonIdx+3:])
-
-	// Remove surrounding quotes
-	if len(celValue) < 2 || celValue[0] != '"' || celValue[len(celValue)-1] != '"' {
-		t.Fatalf("expected quoted CEL string, got: %s", celValue)
-	}
-	escaped := celValue[1 : len(celValue)-1]
-
-	// Reverse CEL escaping: \" -> " and \\ -> \
-	jsonStr := strings.ReplaceAll(escaped, `\"`, `"`)
-	jsonStr = strings.ReplaceAll(jsonStr, `\\`, `\`)
-
-	// Parse JSON
-	var sidecars []hookSidecar
-	if err := json.Unmarshal([]byte(jsonStr), &sidecars); err != nil {
-		t.Fatalf("sidecar annotation is not valid JSON after unescaping: %v\nJSON: %s\nFull CEL value: %s", err, jsonStr, celValue)
-	}
-
-	if len(sidecars) != 2 {
-		t.Fatalf("expected 2 sidecars, got %d: %+v", len(sidecars), sidecars)
-	}
-
-	for _, sc := range sidecars {
-		if sc.Image != "registry.example.com/my-plugin:v1.0" {
-			t.Fatalf("expected custom image, got %q", sc.Image)
-		}
-		if sc.ImagePullPolicy != "Always" {
-			t.Fatalf("expected imagePullPolicy Always, got %q", sc.ImagePullPolicy)
-		}
-	}
-
-	// First sidecar should have --entrypoint ep-a
-	if len(sidecars[0].Args) != 2 || sidecars[0].Args[1] != "ep-a" {
-		t.Fatalf("expected first sidecar args [--entrypoint ep-a], got %v", sidecars[0].Args)
-	}
-
-	// Second sidecar should have --entrypoint ep-b
-	if len(sidecars[1].Args) != 2 || sidecars[1].Args[1] != "ep-b" {
-		t.Fatalf("expected second sidecar args [--entrypoint ep-b], got %v", sidecars[1].Args)
-	}
-}
-
-func TestGenerateDaemonSetWithCustomImage(t *testing.T) {
-	sourceDir := setupSourceDir(t)
-	outputDir := filepath.Join(t.TempDir(), "deploy")
-
-	p := New("test-plugin").
-		WithImage("registry.example.com/my-plugin:v1.0").
-		WithNodeHook(PreVMStart, NodeHandler(&stubNodeHandler{}))
-	if err := p.generate(outputDir, sourceDir); err != nil {
-		t.Fatal(err)
-	}
-
-	var ds testDaemonSet
-	readAndUnmarshal(t, findGeneratedFile(t, outputDir, "daemonset.yaml"), &ds)
-
-	container := ds.Spec.Template.Spec.Containers[0]
-	if container.Image != "registry.example.com/my-plugin:v1.0" {
-		t.Fatalf("expected custom image, got %q", container.Image)
-	}
-}
-
-func TestGenerateDaemonSetWithImagePullPolicy(t *testing.T) {
-	sourceDir := setupSourceDir(t)
-	outputDir := filepath.Join(t.TempDir(), "deploy")
-
-	p := New("test-plugin").
-		WithImage("registry.example.com/my-plugin:v1.0").
-		WithImagePullPolicy("Always").
-		WithNodeHook(PreVMStart, NodeHandler(&stubNodeHandler{}))
-	if err := p.generate(outputDir, sourceDir); err != nil {
-		t.Fatal(err)
-	}
-
-	content := readFileContent(t, findGeneratedFile(t, outputDir, "daemonset.yaml"))
-
-	if !strings.Contains(content, "imagePullPolicy: Always") {
-		t.Fatalf("expected imagePullPolicy Always in DaemonSet, got:\n%s", content)
 	}
 }

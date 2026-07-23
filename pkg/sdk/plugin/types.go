@@ -31,6 +31,7 @@ const (
 	DomainSocketBasePath = "/var/run/kubevirt-plugin"
 	// NodeSocketBasePath is the base directory for node hook sockets.
 	NodeSocketBasePath = "/var/run/kubevirt/plugins"
+	PluginSocketsVolumeName = "kubevirt-plugin-sockets"
 )
 
 // DomainSocketPath returns the full socket path for a domain hook plugin.

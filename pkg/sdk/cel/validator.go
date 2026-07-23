@@ -1,19 +1,21 @@
 package cel
 
 import (
-	"encoding/json"
 	"fmt"
+	"reflect"
 
 	"github.com/google/cel-go/cel"
+	"github.com/google/cel-go/ext"
 	v1 "kubevirt.io/api/core/v1"
+	"libvirt.org/go/libvirtxml"
 )
 
 func ValidateDomainCELExpression(expr string) error {
-	env, err := newDomainCELExprEnv()
+	env, err := newDomainEnv()
 	if err != nil {
 		return fmt.Errorf("creating CEL environment: %w", err)
 	}
-	return validateExpr(env, expr)
+	return validateMutation(env, expr)
 }
 
 func ValidateDomainHookCondition(expr string) error {
@@ -21,7 +23,7 @@ func ValidateDomainHookCondition(expr string) error {
 	if err != nil {
 		return fmt.Errorf("creating CEL environment: %w", err)
 	}
-	return validateExpr(env, expr)
+	return validateCondition(env, expr)
 }
 
 func ValidateNodeHookCondition(expr string) error {
@@ -29,27 +31,18 @@ func ValidateNodeHookCondition(expr string) error {
 	if err != nil {
 		return fmt.Errorf("creating CEL environment: %w", err)
 	}
-	return validateExpr(env, expr)
+	return validateCondition(env, expr)
 }
 
-func EvaluateDomainHookCondition(expr string, vmi *v1.VirtualMachineInstance, domainSpec *v1.DomainSpec) (bool, error) {
+func EvaluateDomainHookCondition(expr string, vmi *v1.VirtualMachineInstance, domain *libvirtxml.Domain) (bool, error) {
 	env, err := newDomainEnv()
 	if err != nil {
 		return false, fmt.Errorf("creating CEL environment: %w", err)
 	}
 
-	vmiMap, err := toMap(vmi)
-	if err != nil {
-		return false, fmt.Errorf("converting VMI: %w", err)
-	}
-	domainSpecMap, err := toMap(domainSpec)
-	if err != nil {
-		return false, fmt.Errorf("converting DomainSpec: %w", err)
-	}
-
 	return evaluate(env, expr, map[string]any{
-		"vmi":        vmiMap,
-		"domainSpec": domainSpecMap,
+		"vmi":        vmi,
+		"domainSpec": domain,
 	})
 }
 
@@ -59,44 +52,61 @@ func EvaluateNodeHookCondition(expr string, vmi *v1.VirtualMachineInstance) (boo
 		return false, fmt.Errorf("creating CEL environment: %w", err)
 	}
 
-	vmiMap, err := toMap(vmi)
-	if err != nil {
-		return false, fmt.Errorf("converting VMI: %w", err)
-	}
-
 	return evaluate(env, expr, map[string]any{
-		"vmi": vmiMap,
+		"vmi": vmi,
 	})
-}
-
-func newDomainCELExprEnv() (*cel.Env, error) {
-	return cel.NewEnv(
-		cel.Variable("domain", cel.DynType),
-		cel.Variable("vmi", cel.DynType),
-		cel.Variable("domainSpec", cel.DynType),
-	)
 }
 
 func newDomainEnv() (*cel.Env, error) {
 	return cel.NewEnv(
-		cel.Variable("vmi", cel.DynType),
-		cel.Variable("domainSpec", cel.DynType),
+		ext.NativeTypes(
+			reflect.TypeOf(&libvirtxml.Domain{}),
+			reflect.TypeOf(&v1.VirtualMachineInstance{}),
+		),
+		cel.Container("libvirtxml"),
+		cel.Variable("vmi", cel.ObjectType("v1.VirtualMachineInstance")),
+		cel.Variable("domainSpec", cel.ObjectType("libvirtxml.Domain")),
 	)
 }
 
 func newNodeEnv() (*cel.Env, error) {
 	return cel.NewEnv(
-		cel.Variable("vmi", cel.DynType),
+		ext.NativeTypes(
+			reflect.TypeOf(&v1.VirtualMachineInstance{}),
+			ext.ParseStructTag("json"),
+		),
+		ext.Strings(),
+		ext.Math(),
+		ext.Lists(),
+		cel.Variable("vmi", cel.ObjectType("v1.VirtualMachineInstance")),
+		cel.CrossTypeNumericComparisons(true),
 	)
 }
 
-func validateExpr(env *cel.Env, expr string) error {
+func validateCondition(env *cel.Env, expr string) error {
 	ast, issues := env.Compile(expr)
 	if issues != nil && issues.Err() != nil {
 		return fmt.Errorf("CEL compilation error: %w", issues.Err())
 	}
 	if ast == nil {
 		return fmt.Errorf("CEL compilation produced nil AST")
+	}
+	if ast.OutputType() != cel.BoolType {
+		return fmt.Errorf("condition must return bool, got %s", ast.OutputType())
+	}
+	return nil
+}
+
+func validateMutation(env *cel.Env, expr string) error {
+	ast, issues := env.Compile(expr)
+	if issues != nil && issues.Err() != nil {
+		return fmt.Errorf("CEL compilation error: %w", issues.Err())
+	}
+	if ast == nil {
+		return fmt.Errorf("CEL compilation produced nil AST")
+	}
+	if !ast.OutputType().IsEquivalentType(cel.ObjectType("libvirtxml.Domain")) {
+		return fmt.Errorf("mutation must return Domain, got %s", ast.OutputType())
 	}
 	return nil
 }
@@ -120,18 +130,6 @@ func evaluate(env *cel.Env, expr string, vars map[string]any) (bool, error) {
 	result, ok := out.Value().(bool)
 	if !ok {
 		return false, fmt.Errorf("CEL expression did not return a boolean, got %T", out.Value())
-	}
-	return result, nil
-}
-
-func toMap(obj any) (map[string]any, error) {
-	data, err := json.Marshal(obj)
-	if err != nil {
-		return nil, err
-	}
-	var result map[string]any
-	if err := json.Unmarshal(data, &result); err != nil {
-		return nil, err
 	}
 	return result, nil
 }

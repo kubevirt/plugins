@@ -80,9 +80,9 @@ func TestWithMultipleNodeHooks(t *testing.T) {
 }
 
 func TestWithConditionSetsPluginLevelCondition(t *testing.T) {
-	p := New("test").WithCondition("vmi.labels.gpu == 'true'")
+	p := New("test").WithCondition("vmi.metadata.name == 'test'")
 
-	if p.condition != "vmi.labels.gpu == 'true'" {
+	if p.condition != "vmi.metadata.name == 'test'" {
 		t.Fatalf("expected condition to be set, got %q", p.condition)
 	}
 }
@@ -101,14 +101,14 @@ func TestDomainHookPerHookSettings(t *testing.T) {
 
 	p := New("test").WithDomainHook(
 		ForLibvirt(handler).
-			WithCondition("vmi.spec.domain.devices.gpus != null").
+			WithCondition("domainSpec.Type == 'kvm'").
 			WithFailureStrategy(Ignore).
 			WithTimeout(timeout),
 	)
 
 	domainHook := p.domainHooks[0]
 
-	if domainHook.condition != "vmi.spec.domain.devices.gpus != null" {
+	if domainHook.condition != "domainSpec.Type == 'kvm'" {
 		t.Fatalf("expected condition, got %q", domainHook.condition)
 	}
 
@@ -158,7 +158,7 @@ func TestFluentChaining(t *testing.T) {
 		WithDomainHook(ForLibvirt(domainHandler)).
 		WithNodeHook(PreVMStart, NodeHandler(nodeHandler)).
 		WithNodeHook(PostVMStop, NodeHandler(nodeHandler)).
-		WithCondition("vmi.labels.special == 'true'").
+		WithCondition("vmi.metadata.name == 'test'").
 		WithFailureStrategy(Ignore)
 
 	if p.name != "full-plugin" {
@@ -173,7 +173,7 @@ func TestFluentChaining(t *testing.T) {
 		t.Fatalf("expected 2 node hooks, got %d", len(p.nodeHooks))
 	}
 
-	if p.condition != "vmi.labels.special == 'true'" {
+	if p.condition != "vmi.metadata.name == 'test'" {
 		t.Fatalf("expected condition, got %q", p.condition)
 	}
 
@@ -460,8 +460,8 @@ func TestWithInvalidPluginLevelCELConditionPanics(t *testing.T) {
 }
 
 func TestWithValidCELConditionSucceeds(t *testing.T) {
-	domainOpt := ForLibvirt(&stubDomainHandler{}).WithCondition("vmi.spec.domain.cpu.cores > 1")
-	if domainOpt.condition != "vmi.spec.domain.cpu.cores > 1" {
+	domainOpt := ForLibvirt(&stubDomainHandler{}).WithCondition("domainSpec.Type == 'kvm'")
+	if domainOpt.condition != "domainSpec.Type == 'kvm'" {
 		t.Fatalf("expected domain hook condition to be set, got %q", domainOpt.condition)
 	}
 
@@ -470,20 +470,20 @@ func TestWithValidCELConditionSucceeds(t *testing.T) {
 		t.Fatalf("expected node hook condition to be set, got %q", nodeOpt.condition)
 	}
 
-	p := New("test").WithCondition("vmi.spec.domain.cpu.cores > 1")
-	if p.condition != "vmi.spec.domain.cpu.cores > 1" {
+	p := New("test").WithCondition("vmi.metadata.name == 'test'")
+	if p.condition != "vmi.metadata.name == 'test'" {
 		t.Fatalf("expected plugin condition to be set, got %q", p.condition)
 	}
 }
 
 func TestCELDomainHookCreation(t *testing.T) {
-	opt := CELDomainHook("domain.name == 'test'")
+	opt := CELDomainHook("Domain{Name: 'test'}")
 
 	if !opt.isCEL() {
 		t.Fatal("expected isCEL to be true")
 	}
 
-	if opt.expression != "domain.name == 'test'" {
+	if opt.expression != "Domain{Name: 'test'}" {
 		t.Fatalf("expected expression, got %q", opt.expression)
 	}
 }
@@ -510,12 +510,12 @@ func TestCELDomainHookInvalidExpressionPanics(t *testing.T) {
 
 func TestCELDomainHookWithPerHookSettings(t *testing.T) {
 	timeout := 30 * time.Second
-	opt := CELDomainHook("domain.name == 'test'").
-		WithCondition("vmi.metadata.name == 'my-vmi'").
+	opt := CELDomainHook("Domain{Name: 'test'}").
+		WithCondition("vmi.Name == 'my-vmi'").
 		WithFailureStrategy(Ignore).
 		WithTimeout(timeout)
 
-	if opt.condition != "vmi.metadata.name == 'my-vmi'" {
+	if opt.condition != "vmi.Name == 'my-vmi'" {
 		t.Fatalf("expected condition, got %q", opt.condition)
 	}
 
@@ -553,11 +553,11 @@ func TestCELDomainHookWithEntrypointPanics(t *testing.T) {
 		}
 	}()
 
-	CELDomainHook("domain.name == 'test'").WithEntrypoint("my-ep")
+	CELDomainHook("Domain{Name: 'test'}").WithEntrypoint("my-ep")
 }
 
 func TestWithDomainCELHookConvenience(t *testing.T) {
-	p := New("test").WithDomainCELHook("domain.name == 'test'")
+	p := New("test").WithDomainCELHook("Domain{Name: 'test'}")
 
 	if len(p.domainHooks) != 1 {
 		t.Fatalf("expected 1 domain hook, got %d", len(p.domainHooks))
@@ -572,7 +572,7 @@ func TestMixedSidecarAndCELDomainHooks(t *testing.T) {
 	handler := &stubDomainHandler{}
 	p := New("test").
 		WithDomainHook(ForLibvirt(handler)).
-		WithDomainCELHook("domain.name == 'test'").
+		WithDomainCELHook("Domain{Name: 'test'}").
 		WithDomainHook(ForLibvirt(handler))
 
 	if len(p.domainHooks) != 3 {
