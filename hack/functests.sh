@@ -11,6 +11,10 @@ export KUBECONFIG
 ARTIFACTS=${ARTIFACTS:-"_out/artifacts"}
 mkdir -p "${ARTIFACTS}"
 
+KUBEVIRTCI_CONFIG_PATH="$(kubevirtci::path)/_ci-configs"
+source "${KUBEVIRTCI_CONFIG_PATH}/${KUBEVIRT_PROVIDER}/config-provider-${KUBEVIRT_PROVIDER}.sh"
+: ${manifest_docker_prefix:?"manifest_docker_prefix not set - is the cluster running?"}
+
 if [ ! -d "tests" ]; then
     echo "No tests/ directory found. Skipping functional tests."
     exit 0
@@ -26,7 +30,8 @@ fi
 
 # "go run" uses the ginkgo version pinned in go.mod, avoiding a separate install step.
 go run github.com/onsi/ginkgo/v2/ginkgo "${ARGS[@]}" \
-    ./tests/ \
+    ./tests/... \
     -- \
     -kubeconfig="${KUBECONFIG}" \
+    --container-prefix="${manifest_docker_prefix}" \
     --artifacts="${ARTIFACTS}"

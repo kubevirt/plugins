@@ -6,6 +6,6 @@ COPY . .
 ARG PLUGIN_PATH
 RUN CGO_ENABLED=0 GOOS=linux go build -o /plugin ./${PLUGIN_PATH}
 
-FROM gcr.io/distroless/static:nonroot
+FROM gcr.io/distroless/static
 COPY --from=builder /plugin /plugin
-ENTRYPOINT ["/plugin"]
+ENTRYPOINT ["/plugin", "serve"]
