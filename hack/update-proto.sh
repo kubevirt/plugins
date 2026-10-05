@@ -11,7 +11,7 @@ SRC_DIR="../kubevirt/pkg/hooks/plugins/v1alpha1"
 DST_DIR="$REPO_ROOT/api/hooks/v1alpha1"
 
 OLD_PKG="kubevirt.io/kubevirt/pkg/hooks/plugins/v1alpha1"
-NEW_PKG="github.com/iholder101/kubevirt-plugins/api/hooks/v1alpha1"
+NEW_PKG="github.com/kubevirt/plugins/api/hooks/v1alpha1"
 
 if [[ ! -d "$SRC_DIR" ]]; then
     echo "Error: kubevirt source not found at $SRC_DIR" >&2

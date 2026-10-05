@@ -3,7 +3,7 @@ package main
 import (
 	"context"
 
-	"github.com/iholder101/kubevirt-plugins/pkg/sdk/plugin"
+	"github.com/kubevirt/plugins/pkg/sdk/plugin"
 )
 
 type nodeHook struct{}

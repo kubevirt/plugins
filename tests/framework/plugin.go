@@ -10,7 +10,7 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
-	"github.com/iholder101/kubevirt-plugins/pkg/sdk/plugin"
+	"github.com/kubevirt/plugins/pkg/sdk/plugin"
 	"libvirt.org/go/libvirtxml"
 	v1 "kubevirt.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"

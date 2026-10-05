@@ -25,7 +25,7 @@ import (
 	v1 "kubevirt.io/api/core/v1"
 	"libvirt.org/go/libvirtxml"
 
-	"github.com/iholder101/kubevirt-plugins/pkg/sdk/plugin"
+	"github.com/kubevirt/plugins/pkg/sdk/plugin"
 )
 
 type smbiosHandler struct{}

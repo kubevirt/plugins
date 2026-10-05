@@ -3,8 +3,8 @@ package cel_domain_hook_test
 import (
 	. "github.com/onsi/ginkgo/v2"
 
-	"github.com/iholder101/kubevirt-plugins/pkg/sdk/plugin"
-	"github.com/iholder101/kubevirt-plugins/tests/framework"
+	"github.com/kubevirt/plugins/pkg/sdk/plugin"
+	"github.com/kubevirt/plugins/tests/framework"
 )
 
 var _ = Describe("CEL Domain Hook", func() {

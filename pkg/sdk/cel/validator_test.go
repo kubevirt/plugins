@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/iholder101/kubevirt-plugins/pkg/sdk/testing/fixtures"
+	"github.com/kubevirt/plugins/pkg/sdk/testing/fixtures"
 )
 
 func TestValidateDomainHookConditionValidExpr(t *testing.T) {

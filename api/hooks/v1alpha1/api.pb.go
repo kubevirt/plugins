@@ -94,10 +94,10 @@ func (m *ExecuteNodeHookRequest) GetNodeContext() *NodeContext {
 type ExecuteNodeHookResponse struct {
 }
 
-func (m *ExecuteNodeHookResponse) Reset()                      { *m = ExecuteNodeHookResponse{} }
-func (m *ExecuteNodeHookResponse) String() string              { return proto.CompactTextString(m) }
-func (*ExecuteNodeHookResponse) ProtoMessage()                 {}
-func (m *ExecuteNodeHookResponse) Descriptor() ([]byte, []int) { return fileDescriptor0, []int{2} }
+func (m *ExecuteNodeHookResponse) Reset()                    { *m = ExecuteNodeHookResponse{} }
+func (m *ExecuteNodeHookResponse) String() string            { return proto.CompactTextString(m) }
+func (*ExecuteNodeHookResponse) ProtoMessage()               {}
+func (*ExecuteNodeHookResponse) Descriptor() ([]byte, []int) { return fileDescriptor0, []int{2} }
 
 type SidecarContext struct {
 	InvocationContext string `protobuf:"bytes,1,opt,name=invocation_context,json=invocationContext" json:"invocation_context,omitempty"`
@@ -122,10 +122,10 @@ type MutateDomainRequest struct {
 	SidecarContext *SidecarContext `protobuf:"bytes,4,opt,name=sidecar_context,json=sidecarContext" json:"sidecar_context,omitempty"`
 }
 
-func (m *MutateDomainRequest) Reset()                      { *m = MutateDomainRequest{} }
-func (m *MutateDomainRequest) String() string              { return proto.CompactTextString(m) }
-func (*MutateDomainRequest) ProtoMessage()                 {}
-func (m *MutateDomainRequest) Descriptor() ([]byte, []int) { return fileDescriptor0, []int{4} }
+func (m *MutateDomainRequest) Reset()                    { *m = MutateDomainRequest{} }
+func (m *MutateDomainRequest) String() string            { return proto.CompactTextString(m) }
+func (*MutateDomainRequest) ProtoMessage()               {}
+func (*MutateDomainRequest) Descriptor() ([]byte, []int) { return fileDescriptor0, []int{4} }
 
 func (m *MutateDomainRequest) GetDomainType() string {
 	if m != nil {
@@ -159,10 +159,10 @@ type MutateDomainResponse struct {
 	Domain []byte `protobuf:"bytes,1,opt,name=domain,proto3" json:"domain,omitempty"`
 }
 
-func (m *MutateDomainResponse) Reset()                      { *m = MutateDomainResponse{} }
-func (m *MutateDomainResponse) String() string              { return proto.CompactTextString(m) }
-func (*MutateDomainResponse) ProtoMessage()                 {}
-func (m *MutateDomainResponse) Descriptor() ([]byte, []int) { return fileDescriptor0, []int{5} }
+func (m *MutateDomainResponse) Reset()                    { *m = MutateDomainResponse{} }
+func (m *MutateDomainResponse) String() string            { return proto.CompactTextString(m) }
+func (*MutateDomainResponse) ProtoMessage()               {}
+func (*MutateDomainResponse) Descriptor() ([]byte, []int) { return fileDescriptor0, []int{5} }
 
 func (m *MutateDomainResponse) GetDomain() []byte {
 	if m != nil {

@@ -2,7 +2,7 @@ syntax = "proto3";
 
 package kubevirt.hooks.plugins.v1alpha1;
 
-option go_package = "github.com/iholder101/kubevirt-plugins/api/hooks/v1alpha1";
+option go_package = "github.com/kubevirt/plugins/api/hooks/v1alpha1";
 
 service NodeHookService {
     rpc ExecuteNodeHook(ExecuteNodeHookRequest) returns (ExecuteNodeHookResponse);

@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	pb "github.com/iholder101/kubevirt-plugins/api/hooks/v1alpha1"
+	pb "github.com/kubevirt/plugins/api/hooks/v1alpha1"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 	v1 "kubevirt.io/api/core/v1"

@@ -1,4 +1,4 @@
-module github.com/iholder101/kubevirt-plugins
+module github.com/kubevirt/plugins
 
 go 1.23.0
 
