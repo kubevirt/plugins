@@ -31,6 +31,15 @@ type domainHookAdapter struct {
 	handler LibvirtDomainHookHandler
 }
 
+type rawDomainHookAdapter struct {
+	handler pb.DomainHookServiceServer
+}
+
+func (a *rawDomainHookAdapter) MutateDomain(ctx context.Context, req *pb.MutateDomainRequest) (*pb.MutateDomainResponse, error) {
+	ctx = context.WithValue(ctx, invocationContextKey, req.GetSidecarContext().GetInvocationContext())
+	return a.handler.MutateDomain(ctx, req)
+}
+
 func (a *domainHookAdapter) MutateDomain(ctx context.Context, req *pb.MutateDomainRequest) (*pb.MutateDomainResponse, error) {
 	invCtx := req.GetSidecarContext().GetInvocationContext()
 	ctx = context.WithValue(ctx, invocationContextKey, invCtx)
@@ -217,19 +226,35 @@ func (p *Plugin) Serve(opts ...serveOption) error {
 	var servers []*grpc.Server
 
 	if len(domainHooks) > 0 {
-		var handler LibvirtDomainHookHandler
-		if len(domainHooks) == 1 {
-			handler = domainHooks[0].handler
-		} else {
-			handlers := make([]LibvirtDomainHookHandler, len(domainHooks))
-			for i, domainHook := range domainHooks {
-				handlers[i] = domainHook.handler
+		var rawHandler pb.DomainHookServiceServer
+		for _, hook := range domainHooks {
+			if hook.rawHandler != nil {
+				if len(domainHooks) != 1 {
+					return fmt.Errorf("raw domain hook requires a dedicated entrypoint %q", effectiveEntrypoint)
+				}
+				rawHandler = hook.rawHandler
 			}
-			handler = &chainedDomainHandler{handlers: handlers}
+		}
+
+		var hookServer pb.DomainHookServiceServer
+		if rawHandler != nil {
+			hookServer = &rawDomainHookAdapter{handler: rawHandler}
+		} else {
+			var handler LibvirtDomainHookHandler
+			if len(domainHooks) == 1 {
+				handler = domainHooks[0].handler
+			} else {
+				handlers := make([]LibvirtDomainHookHandler, len(domainHooks))
+				for i, domainHook := range domainHooks {
+					handlers[i] = domainHook.handler
+				}
+				handler = &chainedDomainHandler{handlers: handlers}
+			}
+			hookServer = &domainHookAdapter{handler: handler}
 		}
 
 		server := grpc.NewServer()
-		pb.RegisterDomainHookServiceServer(server, &domainHookAdapter{handler: handler})
+		pb.RegisterDomainHookServiceServer(server, hookServer)
 
 		listener, err := listenUnix(options.domainSocketPath)
 		if err != nil {
