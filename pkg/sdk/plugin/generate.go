@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"go/version"
 	"os"
 	"path/filepath"
 	"strings"
@@ -327,6 +328,7 @@ func (p *Plugin) generate(outputDir, sourceDir string) error {
 		if err != nil {
 			return err
 		}
+		goVersion = builderGoVersion(goVersion)
 		dockerfileContent, err := renderTemplate(dockerfileTmplStr, struct{ GoVersion string }{goVersion})
 		if err != nil {
 			return err
@@ -579,6 +581,21 @@ func (p *Plugin) sidecarDomainHooks() []DomainHookOption {
 		}
 	}
 	return result
+}
+
+// minBuilderGoVersion is the oldest Go release generated build files use,
+// matching the toolchain this SDK is built and tested with.
+const minBuilderGoVersion = "1.26"
+
+// builderGoVersion returns the golang image tag for building a plugin whose
+// go.mod declares goDirective: the latest patch release of its Go minor, but
+// no older than minBuilderGoVersion.
+func builderGoVersion(goDirective string) string {
+	lang := version.Lang("go" + goDirective)
+	if version.Compare(lang, "go"+minBuilderGoVersion) < 0 {
+		return minBuilderGoVersion
+	}
+	return strings.TrimPrefix(lang, "go")
 }
 
 func readGoVersion(dir string) (string, error) {

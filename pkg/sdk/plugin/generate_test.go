@@ -724,8 +724,8 @@ func TestGenerateDockerfile(t *testing.T) {
 
 	content := readFileContent(t, filepath.Join(sourceDir, "Dockerfile"))
 
-	if !strings.Contains(content, "FROM golang:1.23.0 AS builder") {
-		t.Fatalf("expected Dockerfile to contain Go version 1.23.0, got:\n%s", content)
+	if !strings.Contains(content, "FROM golang:1.26 AS builder") {
+		t.Fatalf("expected Dockerfile to contain Go version 1.26, got:\n%s", content)
 	}
 
 	if !strings.Contains(content, `ENTRYPOINT ["/plugin", "serve"]`) {
@@ -756,8 +756,8 @@ func TestGenerateMakefile(t *testing.T) {
 		t.Fatalf("expected Makefile to contain docker fallback, got:\n%s", content)
 	}
 
-	if !strings.Contains(content, "GO_VERSION ?= 1.23.0") {
-		t.Fatalf("expected Makefile to contain GO_VERSION from go.mod, got:\n%s", content)
+	if !strings.Contains(content, "GO_VERSION ?= 1.26") {
+		t.Fatalf("expected Makefile to contain GO_VERSION 1.26, got:\n%s", content)
 	}
 
 	if !strings.Contains(content, "go test ./...") {
@@ -766,6 +766,27 @@ func TestGenerateMakefile(t *testing.T) {
 
 	if !strings.Contains(content, "go vet ./...") {
 		t.Fatalf("expected Makefile to contain vet target, got:\n%s", content)
+	}
+}
+
+func TestBuilderGoVersion(t *testing.T) {
+	tests := []struct {
+		goDirective string
+		expected    string
+	}{
+		{goDirective: "1.24.0", expected: "1.26"},
+		{goDirective: "1.26", expected: "1.26"},
+		{goDirective: "1.26.3", expected: "1.26"},
+		{goDirective: "1.27.1", expected: "1.27"},
+		{goDirective: "not-a-version", expected: "1.26"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.goDirective, func(t *testing.T) {
+			if got := builderGoVersion(test.goDirective); got != test.expected {
+				t.Fatalf("builderGoVersion(%q) = %q, expected %q", test.goDirective, got, test.expected)
+			}
+		})
 	}
 }
 
