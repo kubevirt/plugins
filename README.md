@@ -11,6 +11,18 @@ This repo provides:
 - **SDK** (`pkg/sdk/plugin`) - A Go framework for developing domain hooks and node hooks with minimal boilerplate.
 - **Catalog** (`plugins/`) - A collection of community plugins (coming soon).
 
+## Compatibility
+
+SDK `vX.Y.Z` targets KubeVirt `vX.Y` and uses that release's `kubevirt.io/api` and vendored libvirtxml.
+
+| SDK | KubeVirt | kubevirt.io/api | libvirtxml | Go |
+|-----|----------|-----------------|------------|----|
+| v1.9.x | v1.9.x | v1.9.1 | v1.12002.0 | >= 1.24 |
+
+The plugin API is alpha: a new minor may break plugins, yet Go tooling treats it as a compatible upgrade.
+Pin the minor matching your cluster's KubeVirt (`go get github.com/kubevirt/plugins@v1.9`), update with
+`go get -u=patch`, and limit dependency bots to patch updates. See [RELEASING.md](RELEASING.md).
+
 ## Example: SMBIOS Manufacturer Injector
 
 A domain hook plugin that sets a custom SMBIOS manufacturer based on the VMI name.
