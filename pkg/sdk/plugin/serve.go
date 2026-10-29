@@ -313,12 +313,9 @@ func (p *Plugin) Execute() {
 
 	switch os.Args[1] {
 	case "serve":
-		var serveOpts []serveOption
-		for i := 2; i < len(os.Args); i++ {
-			if os.Args[i] == "--entrypoint" && i+1 < len(os.Args) {
-				serveOpts = append(serveOpts, withEntrypoint(os.Args[i+1]))
-				i++
-			}
+		serveOpts, err := parseServeArgs(os.Args[2:])
+		if err != nil {
+			log.Fatalf("serve failed: %v", err)
 		}
 		if err := p.Serve(serveOpts...); err != nil {
 			log.Fatalf("serve failed: %v", err)
@@ -335,4 +332,15 @@ func (p *Plugin) Execute() {
 		fmt.Fprintf(os.Stderr, "Unknown subcommand %q. Usage: %s <serve|generate> [args...]\n", os.Args[1], os.Args[0])
 		os.Exit(1)
 	}
+}
+
+func parseServeArgs(args []string) ([]serveOption, error) {
+	var serveOpts []serveOption
+	for i := 0; i < len(args); i++ {
+		if args[i] == "--entrypoint" && i+1 < len(args) {
+			serveOpts = append(serveOpts, withEntrypoint(args[i+1]))
+			i++
+		}
+	}
+	return serveOpts, nil
 }

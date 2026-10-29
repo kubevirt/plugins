@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -133,6 +134,56 @@ func awaitServeStop(t *testing.T, errCh <-chan error) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("serve did not stop within timeout")
 	}
+}
+
+func waitForSocketWhileServing(t *testing.T, path string, errCh <-chan error) {
+	t.Helper()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		select {
+		case err := <-errCh:
+			t.Fatalf("serve returned before socket %s became connectable: %v", path, err)
+		default:
+		}
+
+		conn, err := net.DialTimeout("unix", path, 100*time.Millisecond)
+		if err == nil {
+			conn.Close()
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	t.Fatalf("socket %s did not become connectable within timeout", path)
+}
+
+// unservableSocketPath returns a socket path under a regular file, so serving on it fails.
+func unservableSocketPath(t *testing.T) string {
+	t.Helper()
+
+	notADirectory := filepath.Join(t.TempDir(), "not-a-directory")
+	if err := os.WriteFile(notADirectory, nil, 0644); err != nil {
+		t.Fatalf("failed to create %s: %v", notADirectory, err)
+	}
+
+	return filepath.Join(notADirectory, "x.sock")
+}
+
+func serveWithArgs(t *testing.T, plugin *Plugin, args []string, domainSock, nodeSock string, stopCh <-chan struct{}) <-chan error {
+	t.Helper()
+
+	serveOpts, err := parseServeArgs(args)
+	if err != nil {
+		t.Fatalf("failed to parse serve args %v: %v", args, err)
+	}
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- plugin.Serve(append(serveOpts, withDomainSocketPath(domainSock), withNodeSocketPath(nodeSock), withStopCh(stopCh))...)
+	}()
+
+	return errCh
 }
 
 // --- Adapter unit tests ---
@@ -799,4 +850,95 @@ func TestServeMixedSidecarAndCEL(t *testing.T) {
 
 	close(stopCh)
 	awaitServeStop(t, errCh)
+}
+
+func TestServeWithSidecarArgsServesOnlyDomainHooks(t *testing.T) {
+	tests := []struct {
+		name       string
+		entrypoint string
+	}{
+		{name: "default entrypoint"},
+		{name: "named entrypoint", entrypoint: "ep-a"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			domainSock := filepath.Join(t.TempDir(), "domain.sock")
+			nodeSock := unservableSocketPath(t)
+
+			plugin := New("test-plugin").
+				WithDomainHook(ForLibvirt(&stubDomainHandler{}).WithEntrypoint(test.entrypoint)).
+				WithNodeHook(PreVMStart, NodeHandler(&stubNodeHandler{}).WithEntrypoint(test.entrypoint))
+
+			stopCh := make(chan struct{})
+			errCh := serveWithArgs(t, plugin, plugin.sidecarArgs(plugin.resolveEntrypoint(test.entrypoint)), domainSock, nodeSock, stopCh)
+
+			waitForSocketWhileServing(t, domainSock, errCh)
+
+			close(stopCh)
+			awaitServeStop(t, errCh)
+		})
+	}
+}
+
+func TestServeWithDaemonSetArgsServesOnlyNodeHooks(t *testing.T) {
+	tests := []struct {
+		name       string
+		entrypoint string
+	}{
+		{name: "default entrypoint"},
+		{name: "named entrypoint", entrypoint: "ep-a"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			domainSock := unservableSocketPath(t)
+			nodeSock := filepath.Join(t.TempDir(), "node.sock")
+
+			plugin := New("test-plugin").
+				WithDomainHook(ForLibvirt(&stubDomainHandler{}).WithEntrypoint(test.entrypoint)).
+				WithNodeHook(PreVMStart, NodeHandler(&stubNodeHandler{}).WithEntrypoint(test.entrypoint))
+
+			stopCh := make(chan struct{})
+			errCh := serveWithArgs(t, plugin, plugin.daemonSetArgs(plugin.resolveEntrypoint(test.entrypoint)), domainSock, nodeSock, stopCh)
+
+			waitForSocketWhileServing(t, nodeSock, errCh)
+
+			close(stopCh)
+			awaitServeStop(t, errCh)
+		})
+	}
+}
+
+func TestServeWithDefaultEntrypointArgsAlongsideNamedEntrypoint(t *testing.T) {
+	plugin := New("test-plugin").
+		WithDomainHook(ForLibvirt(&stubDomainHandler{})).
+		WithNodeHook(PreVMStart, NodeHandler(&stubNodeHandler{})).
+		WithDomainHook(ForLibvirt(&stubDomainHandler{}).WithEntrypoint("ep-a"))
+
+	t.Run("sidecar", func(t *testing.T) {
+		domainSock := filepath.Join(t.TempDir(), "domain.sock")
+		nodeSock := filepath.Join(t.TempDir(), "node.sock")
+
+		stopCh := make(chan struct{})
+		errCh := serveWithArgs(t, plugin, plugin.sidecarArgs("test-plugin"), domainSock, nodeSock, stopCh)
+
+		waitForSocketWhileServing(t, domainSock, errCh)
+
+		close(stopCh)
+		awaitServeStop(t, errCh)
+	})
+
+	t.Run("daemonset", func(t *testing.T) {
+		domainSock := filepath.Join(t.TempDir(), "domain.sock")
+		nodeSock := filepath.Join(t.TempDir(), "node.sock")
+
+		stopCh := make(chan struct{})
+		errCh := serveWithArgs(t, plugin, plugin.daemonSetArgs("test-plugin"), domainSock, nodeSock, stopCh)
+
+		waitForSocketWhileServing(t, nodeSock, errCh)
+
+		close(stopCh)
+		awaitServeStop(t, errCh)
+	})
 }

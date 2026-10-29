@@ -7,6 +7,7 @@ import (
 	"go/version"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"text/template"
 
@@ -447,16 +448,21 @@ func (p *Plugin) renderDaemonSet(entrypoint string) (string, error) {
 		PluginName:      p.name,
 		Image:           p.resolveImage(),
 		ImagePullPolicy: p.imagePullPolicy,
+		Args:            p.daemonSetArgs(entrypoint),
 	}
 
 	if len(p.rbacRules) > 0 {
 		data.ServiceAccountName = p.name
 	}
-	if entrypoint != p.name {
-		data.Args = []string{"--entrypoint", entrypoint}
-	}
 
 	return renderTemplate(daemonSetTmplStr, data)
+}
+
+func (p *Plugin) daemonSetArgs(entrypoint string) []string {
+	if entrypoint == p.name {
+		return nil
+	}
+	return []string{"--entrypoint", entrypoint}
 }
 
 func (p *Plugin) renderRBAC() (string, error) {
@@ -485,9 +491,9 @@ func (p *Plugin) renderMAP(entrypoint string) (string, error) {
 	}
 
 	var args string
-	if entrypoint != p.name {
+	if serveArgs := p.sidecarArgs(entrypoint); len(serveArgs) > 0 {
 		args = fmt.Sprintf(`,
-            command: ["/plugin", "serve", "--entrypoint", %q]`, entrypoint)
+            command: %s`, celStringList(append([]string{"/plugin", "serve"}, serveArgs...)))
 	}
 
 	jsonPatchExpr := fmt.Sprintf(`'[
@@ -527,6 +533,21 @@ func (p *Plugin) renderMAP(entrypoint string) (string, error) {
 	}
 
 	return renderTemplate(mapTmplStr, data)
+}
+
+func (p *Plugin) sidecarArgs(entrypoint string) []string {
+	if entrypoint == p.name {
+		return nil
+	}
+	return []string{"--entrypoint", entrypoint}
+}
+
+func celStringList(items []string) string {
+	quoted := make([]string, len(items))
+	for i, item := range items {
+		quoted[i] = strconv.Quote(item)
+	}
+	return "[" + strings.Join(quoted, ", ") + "]"
 }
 
 func (p *Plugin) renderMAPBinding(entrypoint string) (string, error) {
