@@ -1,4 +1,4 @@
-package main_test
+package main
 
 import (
 	"testing"
@@ -9,9 +9,9 @@ import (
 	"github.com/kubevirt/plugins/tests/framework"
 )
 
-func TestDomainMutator(t *testing.T) {
+func TestPreBoot(t *testing.T) {
 	RegisterFailHandler(Fail)
-	RunSpecs(t, "Domain Mutator Suite")
+	RunSpecs(t, "Pre Boot Suite")
 }
 
 var _ = framework.SetupSuite()

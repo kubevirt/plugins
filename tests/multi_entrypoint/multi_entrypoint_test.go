@@ -1,30 +1,24 @@
-package main_test
+package main
 
 import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
-	"github.com/kubevirt/plugins/pkg/sdk/plugin"
 	"github.com/kubevirt/plugins/tests/framework"
 )
 
 var _ = Describe("Multi-Entrypoint Plugin", func() {
-	It("should inject multiple sidecar containers from a single plugin", func() {
+	It("should apply every entrypoint's hook to the domain XML", func() {
 		ns := framework.TestContext.Namespace
 
-		p := plugin.New("test-multi-entrypoint").
-			WithLauncherHook(plugin.GuestDefinition(&framework.NoopGuestDefinitionHandler{}).WithEntrypoint("foo")).
-			WithLauncherHook(plugin.GuestDefinition(&framework.NoopGuestDefinitionHandler{}).WithEntrypoint("bar")).
-			WithNamespace(ns).
-			WithImage(framework.TestContext.ContainerPrefix + "/multi_entrypoint:latest")
-
+		p := newPlugin().WithNamespace(ns).WithImage(framework.TestContext.ContainerPrefix + "/multi_entrypoint:latest")
 		framework.TestContext.DeployPlugin(p, ns)
 
 		vmi := framework.TestContext.CreateVMI(ns)
 		framework.TestContext.WaitForVMIRunning(ns, vmi.Name)
 
-		pod := framework.TestContext.GetLauncherPod(ns, vmi.Name)
-		Expect(framework.TestContext.CountSidecarContainers(pod)).To(BeNumerically(">=", 2),
-			"launcher pod should have at least two sidecar containers (foo and bar entrypoints)")
+		// Hooks are applied in declaration order within the plugin, so foo
+		// appends its marker first and bar joins with a comma.
+		Expect(framework.TestContext.LauncherDomainXML(ns, vmi.Name)).To(ContainSubstring("<description>foo,bar</description>"))
 	})
 })

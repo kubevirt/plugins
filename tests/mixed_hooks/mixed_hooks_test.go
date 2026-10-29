@@ -1,9 +1,8 @@
-package main_test
+package main
 
 import (
 	. "github.com/onsi/ginkgo/v2"
 
-	"github.com/kubevirt/plugins/pkg/sdk/plugin"
 	"github.com/kubevirt/plugins/tests/framework"
 )
 
@@ -11,11 +10,7 @@ var _ = Describe("Mixed Hooks Plugin", func() {
 	It("should start a VMI with domain and node hooks on the default entrypoint", func() {
 		ns := framework.TestContext.Namespace
 
-		p := plugin.New("test-mixed-hooks").
-			WithLauncherHook(plugin.GuestDefinition(&framework.NoopGuestDefinitionHandler{})).
-			WithNodeHook(plugin.NodeHookPreVMStart, plugin.NodeHandler(&framework.NoopNodeHandler{})).
-			WithNamespace(ns).
-			WithImage(framework.TestContext.ContainerPrefix + "/mixed_hooks:latest")
+		p := newPlugin().WithNamespace(ns).WithImage(framework.TestContext.ContainerPrefix + "/mixed_hooks:latest")
 
 		framework.TestContext.DeployPlugin(p, ns)
 

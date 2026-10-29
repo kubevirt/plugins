@@ -18,9 +18,12 @@ func (*nodeHook) ExecuteNodeHook(_ context.Context, _ *plugin.NodeHookRequest) (
 	return nil, nil
 }
 
-func main() {
-	plugin.New("test-mixed-hooks").
+func newPlugin() *plugin.Plugin {
+	return plugin.New("test-mixed-hooks").
 		WithLauncherHook(plugin.GuestDefinition(&domainHook{})).
-		WithNodeHook(plugin.NodeHookPreVMStart, plugin.NodeHandler(&nodeHook{})).
-		Execute()
+		WithNodeHook(plugin.NodeHookPreVMStart, plugin.NodeHandler(&nodeHook{}))
+}
+
+func main() {
+	newPlugin().Execute()
 }

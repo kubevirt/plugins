@@ -26,9 +26,12 @@ func (h *entrypointMutator) GuestDefinition(_ context.Context, req *plugin.Guest
 	return nil
 }
 
-func main() {
-	plugin.New("test-multi-entrypoint").
+func newPlugin() *plugin.Plugin {
+	return plugin.New("test-multi-entrypoint").
 		WithLauncherHook(plugin.GuestDefinition(&entrypointMutator{marker: "foo"}).WithEntrypoint("foo")).
-		WithLauncherHook(plugin.GuestDefinition(&entrypointMutator{marker: "bar"}).WithEntrypoint("bar")).
-		Execute()
+		WithLauncherHook(plugin.GuestDefinition(&entrypointMutator{marker: "bar"}).WithEntrypoint("bar"))
+}
+
+func main() {
+	newPlugin().Execute()
 }
