@@ -13,7 +13,7 @@ var _ = Describe("Domain Mutator", func() {
 		ns := framework.TestContext.Namespace
 
 		p := plugin.New("test-domain-mutator").
-			WithDomainHook(plugin.ForLibvirt(&framework.NoopDomainHandler{})).
+			WithLauncherHook(plugin.GuestDefinition(&framework.NoopGuestDefinitionHandler{})).
 			WithNamespace(ns).
 			WithImage(framework.TestContext.ContainerPrefix + "/domain_mutator:latest")
 

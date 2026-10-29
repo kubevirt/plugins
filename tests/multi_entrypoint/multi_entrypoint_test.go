@@ -13,8 +13,8 @@ var _ = Describe("Multi-Entrypoint Plugin", func() {
 		ns := framework.TestContext.Namespace
 
 		p := plugin.New("test-multi-entrypoint").
-			WithDomainHook(plugin.ForLibvirt(&framework.NoopDomainHandler{}).WithEntrypoint("foo")).
-			WithDomainHook(plugin.ForLibvirt(&framework.NoopDomainHandler{}).WithEntrypoint("bar")).
+			WithLauncherHook(plugin.GuestDefinition(&framework.NoopGuestDefinitionHandler{}).WithEntrypoint("foo")).
+			WithLauncherHook(plugin.GuestDefinition(&framework.NoopGuestDefinitionHandler{}).WithEntrypoint("bar")).
 			WithNamespace(ns).
 			WithImage(framework.TestContext.ContainerPrefix + "/multi_entrypoint:latest")
 

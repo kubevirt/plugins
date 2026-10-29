@@ -3,6 +3,7 @@ package plugin
 import (
 	"path/filepath"
 
+	pb "github.com/kubevirt/plugins/api/hooks/v1alpha1"
 	v1 "kubevirt.io/api/core/v1"
 	pluginv1alpha1 "kubevirt.io/api/plugin/v1alpha1"
 )
@@ -25,42 +26,69 @@ const (
 	Ignore = pluginv1alpha1.FailureStrategyIgnore
 )
 
+// LauncherHookPoint identifies a point in the VM lifecycle where a launcher hook can run.
+type LauncherHookPoint = pluginv1alpha1.LauncherHookPoint
+
 const (
-	// HookSidecarAnnotationName is the VMI annotation key for sidecar injection. Also used in the MAP template (generate.go).
-	HookSidecarAnnotationName = "hooks.kubevirt.io/hookSidecars"
-	// DomainSocketBasePath is the base directory for domain hook sockets.
-	DomainSocketBasePath = "/var/run/kubevirt-plugin"
-	// NodeSocketBasePath is the base directory for node hook sockets.
-	NodeSocketBasePath      = "/var/run/kubevirt/plugins"
-	PluginSocketsVolumeName = "kubevirt-plugin-sockets"
+	LauncherHookGuestDefinition    = pluginv1alpha1.LauncherHookGuestDefinition
+	LauncherHookPreBoot            = pluginv1alpha1.LauncherHookPreBoot
+	LauncherHookPreMigrationSource = pluginv1alpha1.LauncherHookPreMigrationSource
 )
 
-// DomainSocketPath returns the full socket path for a domain hook plugin.
-func DomainSocketPath(pluginName string) string {
-	return filepath.Join(DomainSocketBasePath, pluginName, "domain.sock")
-}
+// InvocationContext identifies why a launcher hook is being invoked.
+type InvocationContext = pluginv1alpha1.InvocationContext
 
-// NodeSocketPath returns the full socket path for a node hook plugin.
-func NodeSocketPath(pluginName string) string {
-	return filepath.Join(NodeSocketBasePath, pluginName, "node.sock")
-}
+const (
+	InvocationContextBoot = pluginv1alpha1.InvocationContextBoot
+	// InvocationContextMigrationSource is never sent to GuestDefinition by
+	// KubeVirt v1.10 (only Boot and MigrationTarget are); migration-source
+	// work belongs to the PreMigrationSource hook.
+	InvocationContextMigrationSource = pluginv1alpha1.InvocationContextMigrationSource
+	InvocationContextMigrationTarget = pluginv1alpha1.InvocationContextMigrationTarget
+)
 
-// DomainSocketPathForEntrypoint returns the socket path for a domain hook
-// with a specific entrypoint. When the entrypoint equals the plugin name
-// or is empty, the default path is used for backward compatibility.
-func DomainSocketPathForEntrypoint(pluginName, entrypoint string) string {
+// PreBoot artifact path keys, as populated by virt-launcher.
+const (
+	PreBootArtifactCloudInitISO     = pb.PreBootArtifactCloudInitISO
+	PreBootArtifactEphemeralDiskDir = pb.PreBootArtifactEphemeralDiskDir
+)
+
+const (
+	// LauncherSocketBasePath is the base directory for launcher hook sockets.
+	LauncherSocketBasePath = "/var/run/kubevirt-plugin"
+	// NodeSocketBasePath is the base directory for node hook sockets.
+	NodeSocketBasePath = "/var/run/kubevirt/plugins"
+	// PluginSocketsVolumeName is the virt-launcher pod volume the plugin sockets live in.
+	PluginSocketsVolumeName = "kubevirt-plugin-sockets"
+	// EphemeralDisksVolumeName is the virt-launcher pod volume holding the PreBoot artifacts.
+	EphemeralDisksVolumeName = "ephemeral-disks"
+	// EphemeralDisksMountPath is where virt-launcher mounts the ephemeral
+	// disks; a PreBoot sidecar must mount the volume at the same path to see
+	// the artifacts.
+	EphemeralDisksMountPath = "/var/run/kubevirt-ephemeral-disks"
+	// SidecarUID and SidecarGID identify the qemu user virt-launcher owns the
+	// boot artifacts with; a PreBoot sidecar needs them to read and rewrite
+	// the artifacts.
+	SidecarUID = 107
+	SidecarGID = 107
+)
+
+// LauncherSocketPath returns the socket path a launcher hook sidecar serves
+// for pluginName. The entrypoint distinguishes sidecars of the same plugin;
+// when it is empty or equals the plugin name the default path is used.
+func LauncherSocketPath(pluginName, entrypoint string) string {
 	if entrypoint == "" || entrypoint == pluginName {
-		return DomainSocketPath(pluginName)
+		return filepath.Join(LauncherSocketBasePath, pluginName, "launcher.sock")
 	}
-	return filepath.Join(DomainSocketBasePath, pluginName, entrypoint, "domain.sock")
+	return filepath.Join(LauncherSocketBasePath, pluginName, entrypoint, "launcher.sock")
 }
 
-// NodeSocketPathForEntrypoint returns the socket path for a node hook
-// with a specific entrypoint. When the entrypoint equals the plugin name
-// or is empty, the default path is used for backward compatibility.
-func NodeSocketPathForEntrypoint(pluginName, entrypoint string) string {
+// NodeSocketPath returns the socket path a node hook DaemonSet serves for
+// pluginName. The entrypoint distinguishes DaemonSets of the same plugin;
+// when it is empty or equals the plugin name the default path is used.
+func NodeSocketPath(pluginName, entrypoint string) string {
 	if entrypoint == "" || entrypoint == pluginName {
-		return NodeSocketPath(pluginName)
+		return filepath.Join(NodeSocketBasePath, pluginName, "node.sock")
 	}
 	return filepath.Join(NodeSocketBasePath, pluginName, entrypoint, "node.sock")
 }

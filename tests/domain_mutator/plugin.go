@@ -4,19 +4,19 @@ import (
 	"context"
 
 	"github.com/kubevirt/plugins/pkg/sdk/plugin"
-	v1 "kubevirt.io/api/core/v1"
-	"libvirt.org/go/libvirtxml"
 )
 
 type domainMutator struct{}
 
-func (*domainMutator) MutateDomain(_ context.Context, domain *libvirtxml.Domain, _ *v1.VirtualMachineInstance) error {
-	domain.Description = "mutated-by-test-domain-mutator"
+// GuestDefinition may run several times per VM start, so the mutation is a
+// fixed value rather than an append.
+func (*domainMutator) GuestDefinition(_ context.Context, req *plugin.GuestDefinitionRequest) error {
+	req.Domain.Description = "mutated-by-test-domain-mutator"
 	return nil
 }
 
 func main() {
 	plugin.New("test-domain-mutator").
-		WithDomainHook(plugin.ForLibvirt(&domainMutator{})).
+		WithLauncherHook(plugin.GuestDefinition(&domainMutator{})).
 		Execute()
 }

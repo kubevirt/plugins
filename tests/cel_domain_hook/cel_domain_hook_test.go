@@ -12,7 +12,7 @@ var _ = Describe("CEL Domain Hook", func() {
 		ns := framework.TestContext.Namespace
 
 		p := plugin.New("test-cel-domain-hook").
-			WithDomainCELHook("Domain{Description: 'cel-functest'}").
+			WithLauncherHook(plugin.GuestDefinitionCEL("Domain{Description: 'cel-functest'}")).
 			WithNamespace(ns)
 
 		framework.TestContext.DeployPlugin(p, ns)

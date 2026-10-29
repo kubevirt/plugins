@@ -3,28 +3,32 @@ package main
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/kubevirt/plugins/pkg/sdk/plugin"
-	v1 "kubevirt.io/api/core/v1"
-	"libvirt.org/go/libvirtxml"
 )
 
 type entrypointMutator struct {
 	marker string
 }
 
-func (h *entrypointMutator) MutateDomain(_ context.Context, domain *libvirtxml.Domain, _ *v1.VirtualMachineInstance) error {
-	if domain.Description == "" {
-		domain.Description = h.marker
+// GuestDefinition may run several times per VM start and see its own earlier
+// output, so the marker is only appended when missing.
+func (h *entrypointMutator) GuestDefinition(_ context.Context, req *plugin.GuestDefinitionRequest) error {
+	if strings.Contains(req.Domain.Description, h.marker) {
+		return nil
+	}
+	if req.Domain.Description == "" {
+		req.Domain.Description = h.marker
 	} else {
-		domain.Description = fmt.Sprintf("%s,%s", domain.Description, h.marker)
+		req.Domain.Description = fmt.Sprintf("%s,%s", req.Domain.Description, h.marker)
 	}
 	return nil
 }
 
 func main() {
 	plugin.New("test-multi-entrypoint").
-		WithDomainHook(plugin.ForLibvirt(&entrypointMutator{marker: "foo"}).WithEntrypoint("foo")).
-		WithDomainHook(plugin.ForLibvirt(&entrypointMutator{marker: "bar"}).WithEntrypoint("bar")).
+		WithLauncherHook(plugin.GuestDefinition(&entrypointMutator{marker: "foo"}).WithEntrypoint("foo")).
+		WithLauncherHook(plugin.GuestDefinition(&entrypointMutator{marker: "bar"}).WithEntrypoint("bar")).
 		Execute()
 }
