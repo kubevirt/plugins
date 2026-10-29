@@ -517,11 +517,11 @@ func (p *Plugin) renderMAP(entrypoint string) (string, error) {
 	data := struct {
 		Name                    string
 		PluginSocketsVolumeName string
-		JSONPatchExpression      string
+		JSONPatchExpression     string
 	}{
 		Name:                    name,
 		PluginSocketsVolumeName: PluginSocketsVolumeName,
-		JSONPatchExpression:      jsonPatchExpr,
+		JSONPatchExpression:     jsonPatchExpr,
 	}
 
 	return renderTemplate(mapTmplStr, data)
