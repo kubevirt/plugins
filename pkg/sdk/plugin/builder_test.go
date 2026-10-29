@@ -2,6 +2,7 @@ package plugin
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -18,8 +19,8 @@ func (s *stubDomainHandler) MutateDomain(_ context.Context, _ *libvirtxml.Domain
 
 type stubNodeHandler struct{}
 
-func (s *stubNodeHandler) ExecuteNodeHook(_ context.Context, _ *NodeHookRequest) error {
-	return nil
+func (s *stubNodeHandler) ExecuteNodeHook(_ context.Context, _ *NodeHookRequest) (*NodeHookResponse, error) {
+	return nil, nil
 }
 
 func TestNewCreatesPluginWithName(t *testing.T) {
@@ -46,13 +47,13 @@ func TestWithDomainHookSetsHandler(t *testing.T) {
 func TestWithNodeHookAddsHookPoint(t *testing.T) {
 	handler := &stubNodeHandler{}
 
-	p := New("test").WithNodeHook(PreVMStart, NodeHandler(handler))
+	p := New("test").WithNodeHook(NodeHookPreVMStart, NodeHandler(handler))
 	if len(p.nodeHooks) != 1 {
 		t.Fatalf("expected 1 node hook, got %d", len(p.nodeHooks))
 	}
 
-	if p.nodeHooks[0].hookPoint != PreVMStart {
-		t.Fatalf("expected hook point %q, got %q", PreVMStart, p.nodeHooks[0].hookPoint)
+	if p.nodeHooks[0].hookPoint != NodeHookPreVMStart {
+		t.Fatalf("expected hook point %q, got %q", NodeHookPreVMStart, p.nodeHooks[0].hookPoint)
 	}
 
 	if p.nodeHooks[0].handler != handler {
@@ -64,14 +65,14 @@ func TestWithMultipleNodeHooks(t *testing.T) {
 	handler := &stubNodeHandler{}
 
 	p := New("test").
-		WithNodeHook(PreVMStart, NodeHandler(handler)).
-		WithNodeHook(PostVMStop, NodeHandler(handler)).
-		WithNodeHook(PreMigrationSource, NodeHandler(handler))
+		WithNodeHook(NodeHookPreVMStart, NodeHandler(handler)).
+		WithNodeHook(NodeHookPostVMStop, NodeHandler(handler)).
+		WithNodeHook(NodeHookPreMigrationSource, NodeHandler(handler))
 	if len(p.nodeHooks) != 3 {
 		t.Fatalf("expected 3 node hooks, got %d", len(p.nodeHooks))
 	}
 
-	expected := []string{PreVMStart, PostVMStop, PreMigrationSource}
+	expected := []NodeHookPoint{NodeHookPreVMStart, NodeHookPostVMStop, NodeHookPreMigrationSource}
 	for i, hp := range expected {
 		if p.nodeHooks[i].hookPoint != hp {
 			t.Fatalf("node hook %d: expected %q, got %q", i, hp, p.nodeHooks[i].hookPoint)
@@ -125,7 +126,7 @@ func TestNodeHookPerHookSettings(t *testing.T) {
 	handler := &stubNodeHandler{}
 	timeout := 60 * time.Second
 
-	p := New("test").WithNodeHook(PreVMStart,
+	p := New("test").WithNodeHook(NodeHookPreVMStart,
 		NodeHandler(handler).
 			WithCondition("vmi.Name == 'test'").
 			WithFailureStrategy(Fail).
@@ -156,8 +157,8 @@ func TestFluentChaining(t *testing.T) {
 
 	p := New("full-plugin").
 		WithDomainHook(ForLibvirt(domainHandler)).
-		WithNodeHook(PreVMStart, NodeHandler(nodeHandler)).
-		WithNodeHook(PostVMStop, NodeHandler(nodeHandler)).
+		WithNodeHook(NodeHookPreVMStart, NodeHandler(nodeHandler)).
+		WithNodeHook(NodeHookPostVMStop, NodeHandler(nodeHandler)).
 		WithCondition("vmi.Name == 'test'").
 		WithFailureStrategy(Ignore)
 
@@ -239,8 +240,8 @@ func TestDuplicateHookPointDifferentEntrypoints(t *testing.T) {
 	handler := &stubNodeHandler{}
 
 	p := New("test").
-		WithNodeHook(PreVMStart, NodeHandler(handler).WithEntrypoint("ep-a")).
-		WithNodeHook(PreVMStart, NodeHandler(handler).WithEntrypoint("ep-b"))
+		WithNodeHook(NodeHookPreVMStart, NodeHandler(handler).WithEntrypoint("ep-a")).
+		WithNodeHook(NodeHookPreVMStart, NodeHandler(handler).WithEntrypoint("ep-b"))
 
 	if len(p.nodeHooks) != 2 {
 		t.Fatalf("expected 2 node hooks, got %d", len(p.nodeHooks))
@@ -256,8 +257,8 @@ func TestDuplicateHookPointSameEntrypointPanics(t *testing.T) {
 
 	handler := &stubNodeHandler{}
 	New("test").
-		WithNodeHook(PreVMStart, NodeHandler(handler).WithEntrypoint("ep-a")).
-		WithNodeHook(PreVMStart, NodeHandler(handler).WithEntrypoint("ep-a"))
+		WithNodeHook(NodeHookPreVMStart, NodeHandler(handler).WithEntrypoint("ep-a")).
+		WithNodeHook(NodeHookPreVMStart, NodeHandler(handler).WithEntrypoint("ep-a"))
 }
 
 func TestPanicsOnInvalidPluginName(t *testing.T) {
@@ -295,6 +296,26 @@ func TestPanicsOnEmptyName(t *testing.T) {
 	New("")
 }
 
+func TestPanicsOnNilNodeHandler(t *testing.T) {
+	defer func() {
+		if r := recover(); r == nil {
+			t.Fatal("expected panic on nil NodeHandler handler")
+		}
+	}()
+
+	NodeHandler(nil)
+}
+
+func TestPanicsOnNodeHookWithoutHandler(t *testing.T) {
+	defer func() {
+		if r := recover(); r == nil {
+			t.Fatal("expected panic on node hook without a handler")
+		}
+	}()
+
+	New("test").WithNodeHook(NodeHookPreVMStart, &NodeHookOption{})
+}
+
 func TestPanicsOnInvalidHookPoint(t *testing.T) {
 	defer func() {
 		if r := recover(); r == nil {
@@ -303,7 +324,128 @@ func TestPanicsOnInvalidHookPoint(t *testing.T) {
 	}()
 
 	handler := &stubNodeHandler{}
-	New("test").WithNodeHook("InvalidHookPoint", NodeHandler(handler))
+	New("test").WithNodeHook(NodeHookPoint("InvalidHookPoint"), NodeHandler(handler))
+}
+
+func TestPanicsOnInvalidFailureStrategy(t *testing.T) {
+	invalid := FailureStrategy("BestEffort")
+
+	t.Run("plugin level", func(t *testing.T) {
+		defer func() {
+			if r := recover(); r == nil {
+				t.Fatal("expected panic on invalid plugin-level failure strategy")
+			}
+		}()
+		New("test").WithFailureStrategy(invalid)
+	})
+
+	t.Run("domain hook", func(t *testing.T) {
+		defer func() {
+			if r := recover(); r == nil {
+				t.Fatal("expected panic on invalid domain hook failure strategy")
+			}
+		}()
+		ForLibvirt(&stubDomainHandler{}).WithFailureStrategy(invalid)
+	})
+
+	t.Run("node hook", func(t *testing.T) {
+		defer func() {
+			if r := recover(); r == nil {
+				t.Fatal("expected panic on invalid node hook failure strategy")
+			}
+		}()
+		NodeHandler(&stubNodeHandler{}).WithFailureStrategy(invalid)
+	})
+}
+
+func TestPanicsOnNonPositiveTimeout(t *testing.T) {
+	t.Run("domain hook zero", func(t *testing.T) {
+		defer func() {
+			if r := recover(); r == nil {
+				t.Fatal("expected panic on zero domain hook timeout")
+			}
+		}()
+		ForLibvirt(&stubDomainHandler{}).WithTimeout(0)
+	})
+
+	t.Run("domain hook negative", func(t *testing.T) {
+		defer func() {
+			if r := recover(); r == nil {
+				t.Fatal("expected panic on negative domain hook timeout")
+			}
+		}()
+		ForLibvirt(&stubDomainHandler{}).WithTimeout(-time.Second)
+	})
+
+	t.Run("node hook zero", func(t *testing.T) {
+		defer func() {
+			if r := recover(); r == nil {
+				t.Fatal("expected panic on zero node hook timeout")
+			}
+		}()
+		NodeHandler(&stubNodeHandler{}).WithTimeout(0)
+	})
+
+	t.Run("node hook negative", func(t *testing.T) {
+		defer func() {
+			if r := recover(); r == nil {
+				t.Fatal("expected panic on negative node hook timeout")
+			}
+		}()
+		NodeHandler(&stubNodeHandler{}).WithTimeout(-time.Second)
+	})
+}
+
+func TestPanicsOnTooLongNodeSocketPath(t *testing.T) {
+	defer func() {
+		r := recover()
+		if r == nil {
+			t.Fatal("expected panic on node socket path exceeding 107 bytes")
+		}
+		if !strings.Contains(fmt.Sprint(r), "node socket path") {
+			t.Fatalf("expected a node socket path panic, got: %v", r)
+		}
+	}()
+
+	New(strings.Repeat("a", 36)).
+		WithNodeHook(NodeHookPreVMStart, NodeHandler(&stubNodeHandler{}).WithEntrypoint(strings.Repeat("b", 36)))
+}
+
+func TestPanicsOnTooLongDaemonSetName(t *testing.T) {
+	defer func() {
+		r := recover()
+		if r == nil {
+			t.Fatal("expected panic on daemonset name exceeding 63 characters")
+		}
+		if !strings.Contains(fmt.Sprint(r), "daemonset name") {
+			t.Fatalf("expected a daemonset name panic, got: %v", r)
+		}
+	}()
+
+	New(strings.Repeat("a", 32)).
+		WithNodeHook(NodeHookPreVMStart, NodeHandler(&stubNodeHandler{}).WithEntrypoint(strings.Repeat("b", 31)))
+}
+
+func TestAcceptsLongestNodeSocketPath(t *testing.T) {
+	// The longest plugin name keeps the default node socket path at 98
+	// bytes, the most the DaemonSet name limit of 63 characters allows.
+	p := New(strings.Repeat("a", 63)).
+		WithNodeHook(NodeHookPreVMStart, NodeHandler(&stubNodeHandler{}))
+
+	if len(p.nodeHooks) != 1 {
+		t.Fatalf("expected 1 node hook, got %d", len(p.nodeHooks))
+	}
+}
+
+func TestAcceptsLongestDaemonSetName(t *testing.T) {
+	// Plugin and entrypoint names totalling 62 characters produce a
+	// 63-character DaemonSet name, the longest Kubernetes accepts.
+	p := New(strings.Repeat("a", 32)).
+		WithNodeHook(NodeHookPreVMStart, NodeHandler(&stubNodeHandler{}).WithEntrypoint(strings.Repeat("b", 30)))
+
+	if len(p.nodeHooks) != 1 {
+		t.Fatalf("expected 1 node hook, got %d", len(p.nodeHooks))
+	}
 }
 
 func TestPanicsOnDuplicateHookPoint(t *testing.T) {
@@ -315,8 +457,8 @@ func TestPanicsOnDuplicateHookPoint(t *testing.T) {
 
 	handler := &stubNodeHandler{}
 	New("test").
-		WithNodeHook(PreVMStart, NodeHandler(handler)).
-		WithNodeHook(PreVMStart, NodeHandler(handler))
+		WithNodeHook(NodeHookPreVMStart, NodeHandler(handler)).
+		WithNodeHook(NodeHookPreVMStart, NodeHandler(handler))
 }
 
 func TestWithNamespaceSetsNamespace(t *testing.T) {
@@ -410,8 +552,8 @@ func TestDuplicateHookPointResolvedEntrypointPanics(t *testing.T) {
 
 	handler := &stubNodeHandler{}
 	New("my-plugin").
-		WithNodeHook(PreVMStart, NodeHandler(handler)).
-		WithNodeHook(PreVMStart, NodeHandler(handler).WithEntrypoint("my-plugin"))
+		WithNodeHook(NodeHookPreVMStart, NodeHandler(handler)).
+		WithNodeHook(NodeHookPreVMStart, NodeHandler(handler).WithEntrypoint("my-plugin"))
 }
 
 func TestWithNodeHookDoesNotMutateCallerOption(t *testing.T) {
@@ -422,7 +564,7 @@ func TestWithNodeHookDoesNotMutateCallerOption(t *testing.T) {
 		t.Fatal("expected empty hookPoint before WithNodeHook")
 	}
 
-	New("test").WithNodeHook(PreVMStart, opt)
+	New("test").WithNodeHook(NodeHookPreVMStart, opt)
 
 	if opt.hookPoint != "" {
 		t.Fatalf("expected hookPoint to remain empty after WithNodeHook, got %q", opt.hookPoint)
@@ -463,7 +605,7 @@ func TestWithEmptyConditionSucceeds(t *testing.T) {
 	p := New("test").
 		WithCondition("").
 		WithDomainHook(ForLibvirt(&stubDomainHandler{}).WithCondition("")).
-		WithNodeHook(PreVMStart, NodeHandler(&stubNodeHandler{}).WithCondition(""))
+		WithNodeHook(NodeHookPreVMStart, NodeHandler(&stubNodeHandler{}).WithCondition(""))
 
 	if len(p.domainHooks) != 1 || p.domainHooks[0].condition != "" {
 		t.Fatal("expected domain hook with empty condition to be registered")

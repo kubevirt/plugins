@@ -277,7 +277,7 @@ func TestGeneratePluginCRNodeHookOnly(t *testing.T) {
 	sourceDir := setupSourceDir(t)
 	outputDir := filepath.Join(t.TempDir(), "deploy")
 
-	p := New("test-plugin").WithNodeHook(PreVMStart, NodeHandler(&stubNodeHandler{}))
+	p := New("test-plugin").WithNodeHook(NodeHookPreVMStart, NodeHandler(&stubNodeHandler{}))
 	if err := p.generate(outputDir, sourceDir); err != nil {
 		t.Fatal(err)
 	}
@@ -301,8 +301,8 @@ func TestGeneratePluginCRNodeHookOnly(t *testing.T) {
 		t.Fatalf("expected 1 nodeHook, got %d", len(cr.Spec.NodeHooks))
 	}
 
-	if len(cr.Spec.NodeHooks[0].PermittedHooks) != 1 || cr.Spec.NodeHooks[0].PermittedHooks[0] != PreVMStart {
-		t.Fatalf("expected permittedHooks [%q], got %v", PreVMStart, cr.Spec.NodeHooks[0].PermittedHooks)
+	if len(cr.Spec.NodeHooks[0].PermittedHooks) != 1 || cr.Spec.NodeHooks[0].PermittedHooks[0] != string(NodeHookPreVMStart) {
+		t.Fatalf("expected permittedHooks [%q], got %v", NodeHookPreVMStart, cr.Spec.NodeHooks[0].PermittedHooks)
 	}
 
 	if cr.Spec.NodeHooks[0].Socket != "/var/run/kubevirt/plugins/test-plugin/node.sock" {
@@ -345,7 +345,7 @@ func TestGeneratePluginCRBothHooks(t *testing.T) {
 
 	p := New("test-plugin").
 		WithDomainHook(ForLibvirt(&stubDomainHandler{})).
-		WithNodeHook(PreVMStart, NodeHandler(&stubNodeHandler{}))
+		WithNodeHook(NodeHookPreVMStart, NodeHandler(&stubNodeHandler{}))
 	if err := p.generate(outputDir, sourceDir); err != nil {
 		t.Fatal(err)
 	}
@@ -367,7 +367,7 @@ func TestGeneratePluginCRWithCondition(t *testing.T) {
 	outputDir := filepath.Join(t.TempDir(), "deploy")
 
 	p := New("test-plugin").
-		WithNodeHook(PreVMStart, NodeHandler(&stubNodeHandler{})).
+		WithNodeHook(NodeHookPreVMStart, NodeHandler(&stubNodeHandler{})).
 		WithCondition("vmi.Name == 'test'")
 	if err := p.generate(outputDir, sourceDir); err != nil {
 		t.Fatal(err)
@@ -386,7 +386,7 @@ func TestGeneratePluginCRWithPerHookSettings(t *testing.T) {
 	outputDir := filepath.Join(t.TempDir(), "deploy")
 
 	timeout := 30 * time.Second
-	p := New("test-plugin").WithNodeHook(PreVMStart,
+	p := New("test-plugin").WithNodeHook(NodeHookPreVMStart,
 		NodeHandler(&stubNodeHandler{}).
 			WithCondition("vmi.Name == 'test'").
 			WithFailureStrategy(Ignore).
@@ -418,11 +418,85 @@ func TestGeneratePluginCRWithPerHookSettings(t *testing.T) {
 	}
 }
 
+func TestGeneratePluginCRRendersOnVMStop(t *testing.T) {
+	sourceDir := setupSourceDir(t)
+	outputDir := filepath.Join(t.TempDir(), "deploy")
+
+	p := New("test-plugin").WithNodeHook(NodeHookOnVMStop, NodeHandler(&stubNodeHandler{}))
+	if err := p.generate(outputDir, sourceDir); err != nil {
+		t.Fatal(err)
+	}
+
+	var cr testPluginCR
+	readAndUnmarshal(t, findGeneratedFile(t, outputDir, "plugin.yaml"), &cr)
+
+	if len(cr.Spec.NodeHooks) != 1 {
+		t.Fatalf("expected 1 nodeHook, got %d", len(cr.Spec.NodeHooks))
+	}
+
+	if len(cr.Spec.NodeHooks[0].PermittedHooks) != 1 || cr.Spec.NodeHooks[0].PermittedHooks[0] != string(NodeHookOnVMStop) {
+		t.Fatalf("expected permittedHooks [%q], got %v", NodeHookOnVMStop, cr.Spec.NodeHooks[0].PermittedHooks)
+	}
+}
+
+func TestGeneratePluginCRKeepsPluginFailureStrategyAtPluginLevel(t *testing.T) {
+	sourceDir := setupSourceDir(t)
+	outputDir := filepath.Join(t.TempDir(), "deploy")
+
+	p := New("test-plugin").
+		WithFailureStrategy(Ignore).
+		WithNodeHook(NodeHookPreVMStart, NodeHandler(&stubNodeHandler{})).
+		WithNodeHook(NodeHookPostVMStop, NodeHandler(&stubNodeHandler{}).WithFailureStrategy(Fail))
+	if err := p.generate(outputDir, sourceDir); err != nil {
+		t.Fatal(err)
+	}
+
+	var cr testPluginCR
+	readAndUnmarshal(t, findGeneratedFile(t, outputDir, "plugin.yaml"), &cr)
+
+	if len(cr.Spec.NodeHooks) != 2 {
+		t.Fatalf("expected 2 nodeHooks, got %d", len(cr.Spec.NodeHooks))
+	}
+
+	if cr.Spec.FailureStrategy != "Ignore" {
+		t.Fatalf("expected plugin-level failureStrategy Ignore, got %q", cr.Spec.FailureStrategy)
+	}
+
+	if cr.Spec.NodeHooks[0].FailureStrategy != "" {
+		t.Fatalf("expected no failureStrategy on the node hook without an explicit strategy, got %q", cr.Spec.NodeHooks[0].FailureStrategy)
+	}
+
+	if cr.Spec.NodeHooks[1].FailureStrategy != "Fail" {
+		t.Fatalf("expected explicit node hook failureStrategy Fail to be kept, got %q", cr.Spec.NodeHooks[1].FailureStrategy)
+	}
+}
+
+func TestGeneratePluginCRNodeHookWithoutAnyFailureStrategy(t *testing.T) {
+	sourceDir := setupSourceDir(t)
+	outputDir := filepath.Join(t.TempDir(), "deploy")
+
+	p := New("test-plugin").WithNodeHook(NodeHookPreVMStart, NodeHandler(&stubNodeHandler{}))
+	if err := p.generate(outputDir, sourceDir); err != nil {
+		t.Fatal(err)
+	}
+
+	var cr testPluginCR
+	readAndUnmarshal(t, findGeneratedFile(t, outputDir, "plugin.yaml"), &cr)
+
+	if len(cr.Spec.NodeHooks) != 1 {
+		t.Fatalf("expected 1 nodeHook, got %d", len(cr.Spec.NodeHooks))
+	}
+
+	if cr.Spec.NodeHooks[0].FailureStrategy != "" {
+		t.Fatalf("expected no failureStrategy on the node hook, got %q", cr.Spec.NodeHooks[0].FailureStrategy)
+	}
+}
+
 func TestGenerateDaemonSet(t *testing.T) {
 	sourceDir := setupSourceDir(t)
 	outputDir := filepath.Join(t.TempDir(), "deploy")
 
-	p := New("test-plugin").WithNodeHook(PreVMStart, NodeHandler(&stubNodeHandler{}))
+	p := New("test-plugin").WithNodeHook(NodeHookPreVMStart, NodeHandler(&stubNodeHandler{}))
 	if err := p.generate(outputDir, sourceDir); err != nil {
 		t.Fatal(err)
 	}
@@ -488,7 +562,7 @@ func TestGenerateRBACWhenRulesProvided(t *testing.T) {
 	}}
 
 	p := New("test-plugin").
-		WithNodeHook(PreVMStart, NodeHandler(&stubNodeHandler{})).
+		WithNodeHook(NodeHookPreVMStart, NodeHandler(&stubNodeHandler{})).
 		WithRBACRules(rules)
 	if err := p.generate(outputDir, sourceDir); err != nil {
 		t.Fatal(err)
@@ -564,7 +638,7 @@ func TestGenerateRBACWithCustomNamespace(t *testing.T) {
 	}}
 
 	p := New("test-plugin").
-		WithNodeHook(PreVMStart, NodeHandler(&stubNodeHandler{})).
+		WithNodeHook(NodeHookPreVMStart, NodeHandler(&stubNodeHandler{})).
 		WithRBACRules(rules).
 		WithNamespace("kube-system")
 	if err := p.generate(outputDir, sourceDir); err != nil {
@@ -600,7 +674,7 @@ func TestGenerateRBACWithResourceNames(t *testing.T) {
 	}}
 
 	p := New("test-plugin").
-		WithNodeHook(PreVMStart, NodeHandler(&stubNodeHandler{})).
+		WithNodeHook(NodeHookPreVMStart, NodeHandler(&stubNodeHandler{})).
 		WithRBACRules(rules)
 	if err := p.generate(outputDir, sourceDir); err != nil {
 		t.Fatal(err)
@@ -622,7 +696,7 @@ func TestGenerateNoRBACWhenNoRules(t *testing.T) {
 	sourceDir := setupSourceDir(t)
 	outputDir := filepath.Join(t.TempDir(), "deploy")
 
-	p := New("test-plugin").WithNodeHook(PreVMStart, NodeHandler(&stubNodeHandler{}))
+	p := New("test-plugin").WithNodeHook(NodeHookPreVMStart, NodeHandler(&stubNodeHandler{}))
 	if err := p.generate(outputDir, sourceDir); err != nil {
 		t.Fatal(err)
 	}
@@ -738,7 +812,7 @@ func TestGenerateDockerfile(t *testing.T) {
 	sourceDir := setupSourceDir(t)
 	outputDir := filepath.Join(t.TempDir(), "deploy")
 
-	p := New("test-plugin").WithNodeHook(PreVMStart, NodeHandler(&stubNodeHandler{}))
+	p := New("test-plugin").WithNodeHook(NodeHookPreVMStart, NodeHandler(&stubNodeHandler{}))
 	if err := p.generate(outputDir, sourceDir); err != nil {
 		t.Fatal(err)
 	}
@@ -758,7 +832,7 @@ func TestGenerateMakefile(t *testing.T) {
 	sourceDir := setupSourceDir(t)
 	outputDir := filepath.Join(t.TempDir(), "deploy")
 
-	p := New("test-plugin").WithNodeHook(PreVMStart, NodeHandler(&stubNodeHandler{}))
+	p := New("test-plugin").WithNodeHook(NodeHookPreVMStart, NodeHandler(&stubNodeHandler{}))
 	if err := p.generate(outputDir, sourceDir); err != nil {
 		t.Fatal(err)
 	}
@@ -815,7 +889,7 @@ func TestGenerateCreatesOutputDir(t *testing.T) {
 	sourceDir := setupSourceDir(t)
 	outputDir := filepath.Join(t.TempDir(), "nested", "deploy")
 
-	p := New("test-plugin").WithNodeHook(PreVMStart, NodeHandler(&stubNodeHandler{}))
+	p := New("test-plugin").WithNodeHook(NodeHookPreVMStart, NodeHandler(&stubNodeHandler{}))
 	if err := p.generate(outputDir, sourceDir); err != nil {
 		t.Fatal(err)
 	}
@@ -846,7 +920,7 @@ func TestGenerateFileNumbering(t *testing.T) {
 
 	p := New("test-plugin").
 		WithDomainHook(ForLibvirt(&stubDomainHandler{})).
-		WithNodeHook(PreVMStart, NodeHandler(&stubNodeHandler{})).
+		WithNodeHook(NodeHookPreVMStart, NodeHandler(&stubNodeHandler{})).
 		WithRBACRules(rules)
 	if err := p.generate(outputDir, sourceDir); err != nil {
 		t.Fatal(err)
@@ -935,7 +1009,7 @@ func TestGenerateRBACWithNonResourceURLs(t *testing.T) {
 	}}
 
 	p := New("test-plugin").
-		WithNodeHook(PreVMStart, NodeHandler(&stubNodeHandler{})).
+		WithNodeHook(NodeHookPreVMStart, NodeHandler(&stubNodeHandler{})).
 		WithRBACRules(rules)
 	if err := p.generate(outputDir, sourceDir); err != nil {
 		t.Fatal(err)
@@ -962,8 +1036,8 @@ func TestGenerateMultiEntrypointDaemonSets(t *testing.T) {
 	outputDir := filepath.Join(t.TempDir(), "deploy")
 
 	p := New("test-plugin").
-		WithNodeHook(PreVMStart, NodeHandler(&stubNodeHandler{}).WithEntrypoint("ep-a")).
-		WithNodeHook(PostVMStop, NodeHandler(&stubNodeHandler{}).WithEntrypoint("ep-b"))
+		WithNodeHook(NodeHookPreVMStart, NodeHandler(&stubNodeHandler{}).WithEntrypoint("ep-a")).
+		WithNodeHook(NodeHookPostVMStop, NodeHandler(&stubNodeHandler{}).WithEntrypoint("ep-b"))
 	if err := p.generate(outputDir, sourceDir); err != nil {
 		t.Fatal(err)
 	}
@@ -1030,7 +1104,7 @@ func TestGenerateMultiEntrypointPluginCR(t *testing.T) {
 	p := New("test-plugin").
 		WithDomainHook(ForLibvirt(&stubDomainHandler{}).WithEntrypoint("ep-a")).
 		WithDomainHook(ForLibvirt(&stubDomainHandler{}).WithEntrypoint("ep-b")).
-		WithNodeHook(PreVMStart, NodeHandler(&stubNodeHandler{}).WithEntrypoint("ep-a"))
+		WithNodeHook(NodeHookPreVMStart, NodeHandler(&stubNodeHandler{}).WithEntrypoint("ep-a"))
 	if err := p.generate(outputDir, sourceDir); err != nil {
 		t.Fatal(err)
 	}
@@ -1064,7 +1138,7 @@ func TestGenerateDaemonSetContainerArgs(t *testing.T) {
 	outputDir := filepath.Join(t.TempDir(), "deploy")
 
 	p := New("test-plugin").
-		WithNodeHook(PreVMStart, NodeHandler(&stubNodeHandler{}).WithEntrypoint("ep-a"))
+		WithNodeHook(NodeHookPreVMStart, NodeHandler(&stubNodeHandler{}).WithEntrypoint("ep-a"))
 	if err := p.generate(outputDir, sourceDir); err != nil {
 		t.Fatal(err)
 	}
@@ -1115,7 +1189,7 @@ func TestGenerateSingleEntrypointBackwardCompat(t *testing.T) {
 
 	p := New("test-plugin").
 		WithDomainHook(ForLibvirt(&stubDomainHandler{})).
-		WithNodeHook(PreVMStart, NodeHandler(&stubNodeHandler{}))
+		WithNodeHook(NodeHookPreVMStart, NodeHandler(&stubNodeHandler{}))
 	if err := p.generate(outputDir, sourceDir); err != nil {
 		t.Fatal(err)
 	}
@@ -1150,7 +1224,7 @@ func TestGenerateDefaultEntrypointDaemonSetArgs(t *testing.T) {
 	sourceDir := setupSourceDir(t)
 	outputDir := filepath.Join(t.TempDir(), "deploy")
 
-	p := New("test-plugin").WithNodeHook(PreVMStart, NodeHandler(&stubNodeHandler{}))
+	p := New("test-plugin").WithNodeHook(NodeHookPreVMStart, NodeHandler(&stubNodeHandler{}))
 	if err := p.generate(outputDir, sourceDir); err != nil {
 		t.Fatal(err)
 	}
@@ -1250,7 +1324,7 @@ func TestGenerateNodeSocketPathSubdirectory(t *testing.T) {
 	outputDir := filepath.Join(t.TempDir(), "deploy")
 
 	p := New("test-plugin").
-		WithNodeHook(PreVMStart, NodeHandler(&stubNodeHandler{}).WithEntrypoint("ep-a"))
+		WithNodeHook(NodeHookPreVMStart, NodeHandler(&stubNodeHandler{}).WithEntrypoint("ep-a"))
 	if err := p.generate(outputDir, sourceDir); err != nil {
 		t.Fatal(err)
 	}
@@ -1355,7 +1429,7 @@ func TestGenerateCELDomainHookWithNodeHook(t *testing.T) {
 
 	p := New("test-plugin").
 		WithDomainCELHook("Domain{Name: 'test'}").
-		WithNodeHook(PreVMStart, NodeHandler(&stubNodeHandler{}))
+		WithNodeHook(NodeHookPreVMStart, NodeHandler(&stubNodeHandler{}))
 	if err := p.generate(outputDir, sourceDir); err != nil {
 		t.Fatal(err)
 	}

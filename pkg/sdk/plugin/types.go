@@ -4,12 +4,13 @@ import (
 	"path/filepath"
 
 	v1 "kubevirt.io/api/core/v1"
+	pluginv1alpha1 "kubevirt.io/api/plugin/v1alpha1"
 )
 
 // NodeHookRequest contains the inputs passed to a node hook handler.
 type NodeHookRequest struct {
-	// HookPoint is the lifecycle point being invoked (e.g. PreVMStart, PostVMStop).
-	HookPoint string
+	// HookPoint is the lifecycle point being invoked (e.g. PreVMStart, OnVMStop).
+	HookPoint NodeHookPoint
 	// VMI is the VirtualMachineInstance associated with this hook invocation.
 	VMI *v1.VirtualMachineInstance
 	// NodeName is the Kubernetes node where the VM is running.
@@ -17,11 +18,11 @@ type NodeHookRequest struct {
 }
 
 // FailureStrategy controls how KubeVirt handles a plugin hook failure.
-type FailureStrategy string
+type FailureStrategy = pluginv1alpha1.FailureStrategy
 
 const (
-	Fail   FailureStrategy = "Fail"
-	Ignore FailureStrategy = "Ignore"
+	Fail   = pluginv1alpha1.FailureStrategyFail
+	Ignore = pluginv1alpha1.FailureStrategyIgnore
 )
 
 const (

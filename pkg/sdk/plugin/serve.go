@@ -74,13 +74,14 @@ func (a *domainHookAdapter) PreMigrationSource(ctx context.Context, req *pb.PreM
 }
 
 type nodeHookAdapter struct {
-	handlers map[string]NodeHookHandler
+	handlers map[NodeHookPoint]NodeHookHandler
 }
 
 func (a *nodeHookAdapter) ExecuteNodeHook(ctx context.Context, req *pb.ExecuteNodeHookRequest) (*pb.ExecuteNodeHookResponse, error) {
-	handler, ok := a.handlers[req.GetHookPoint()]
+	hookPoint := NodeHookPoint(req.GetHookPoint())
+	handler, ok := a.handlers[hookPoint]
 	if !ok {
-		return nil, fmt.Errorf("no handler registered for hook point %q", req.GetHookPoint())
+		return nil, fmt.Errorf("no handler registered for hook point %q", hookPoint)
 	}
 
 	var vmi v1.VirtualMachineInstance
@@ -89,12 +90,12 @@ func (a *nodeHookAdapter) ExecuteNodeHook(ctx context.Context, req *pb.ExecuteNo
 	}
 
 	hookReq := &NodeHookRequest{
-		HookPoint: req.GetHookPoint(),
+		HookPoint: hookPoint,
 		VMI:       &vmi,
 		NodeName:  req.GetNodeContext().GetNodeName(),
 	}
 
-	if err := handler.ExecuteNodeHook(ctx, hookReq); err != nil {
+	if _, err := handler.ExecuteNodeHook(ctx, hookReq); err != nil {
 		return nil, fmt.Errorf("node hook handler failed: %w", err)
 	}
 
@@ -280,7 +281,7 @@ func (p *Plugin) Serve(opts ...serveOption) error {
 
 	if len(nodeHooks) > 0 {
 		server := grpc.NewServer()
-		handlers := make(map[string]NodeHookHandler, len(nodeHooks))
+		handlers := make(map[NodeHookPoint]NodeHookHandler, len(nodeHooks))
 		for _, nodeHook := range nodeHooks {
 			handlers[nodeHook.hookPoint] = nodeHook.handler
 		}

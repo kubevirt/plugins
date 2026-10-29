@@ -1,23 +1,31 @@
 package plugin
 
-const (
-	PreVMStart          = "PreVMStart"
-	PostVMStart         = "PostVMStart"
-	PreVMStop           = "PreVMStop"
-	PostVMStop          = "PostVMStop"
-	PreMigrationSource  = "PreMigrationSource"
-	PreMigrationTarget  = "PreMigrationTarget"
-	PostMigrationTarget = "PostMigrationTarget"
+import (
+	pluginv1alpha1 "kubevirt.io/api/plugin/v1alpha1"
 )
 
-func AllHookPoints() []string {
-	return []string{
-		PreVMStart,
-		PostVMStart,
-		PreVMStop,
-		PostVMStop,
-		PreMigrationSource,
-		PreMigrationTarget,
-		PostMigrationTarget,
+// NodeHookPoint identifies a VM lifecycle event for node-level hooks.
+type NodeHookPoint = pluginv1alpha1.NodeHookPoint
+
+const (
+	NodeHookPreVMStart          = pluginv1alpha1.NodeHookPreVMStart
+	NodeHookPostVMStart         = pluginv1alpha1.NodeHookPostVMStart
+	NodeHookOnVMStop            = pluginv1alpha1.NodeHookOnVMStop
+	NodeHookPostVMStop          = pluginv1alpha1.NodeHookPostVMStop
+	NodeHookPreMigrationSource  = pluginv1alpha1.NodeHookPreMigrationSource
+	NodeHookPreMigrationTarget  = pluginv1alpha1.NodeHookPreMigrationTarget
+	NodeHookPostMigrationTarget = pluginv1alpha1.NodeHookPostMigrationTarget
+)
+
+// AllNodeHookPoints returns every node hook point.
+func AllNodeHookPoints() []NodeHookPoint {
+	return []NodeHookPoint{
+		NodeHookPreVMStart,
+		NodeHookPostVMStart,
+		NodeHookOnVMStop,
+		NodeHookPostVMStop,
+		NodeHookPreMigrationSource,
+		NodeHookPreMigrationTarget,
+		NodeHookPostMigrationTarget,
 	}
 }

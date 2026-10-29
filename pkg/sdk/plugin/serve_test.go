@@ -53,21 +53,21 @@ type errorNodeHandler struct {
 	err error
 }
 
-func (h *errorNodeHandler) ExecuteNodeHook(_ context.Context, _ *NodeHookRequest) error {
-	return h.err
+func (h *errorNodeHandler) ExecuteNodeHook(_ context.Context, _ *NodeHookRequest) (*NodeHookResponse, error) {
+	return nil, h.err
 }
 
 type recordingNodeHandler struct {
-	receivedHookPoint string
+	receivedHookPoint NodeHookPoint
 	receivedNodeName  string
 	receivedVMI       *v1.VirtualMachineInstance
 }
 
-func (h *recordingNodeHandler) ExecuteNodeHook(_ context.Context, req *NodeHookRequest) error {
+func (h *recordingNodeHandler) ExecuteNodeHook(_ context.Context, req *NodeHookRequest) (*NodeHookResponse, error) {
 	h.receivedHookPoint = req.HookPoint
 	h.receivedNodeName = req.NodeName
 	h.receivedVMI = req.VMI
-	return nil
+	return nil, nil
 }
 
 func mustMarshalVMI(t *testing.T, vmi *v1.VirtualMachineInstance) []byte {
@@ -293,11 +293,11 @@ func TestDomainHookAdapterUnimplementedHookPoints(t *testing.T) {
 
 func TestNodeHookAdapterCallsHandler(t *testing.T) {
 	handler := &recordingNodeHandler{}
-	adapter := &nodeHookAdapter{handlers: map[string]NodeHookHandler{PreVMStart: handler}}
+	adapter := &nodeHookAdapter{handlers: map[NodeHookPoint]NodeHookHandler{NodeHookPreVMStart: handler}}
 
 	vmi := testVMI("node-vmi")
 	_, err := adapter.ExecuteNodeHook(context.Background(), &pb.ExecuteNodeHookRequest{
-		HookPoint:   PreVMStart,
+		HookPoint:   string(NodeHookPreVMStart),
 		Vmi:         mustMarshalVMI(t, vmi),
 		NodeContext: &pb.NodeContext{NodeName: "worker-1"},
 	})
@@ -305,8 +305,8 @@ func TestNodeHookAdapterCallsHandler(t *testing.T) {
 		t.Fatalf("ExecuteNodeHook failed: %v", err)
 	}
 
-	if handler.receivedHookPoint != PreVMStart {
-		t.Fatalf("expected hook point %q, got %q", PreVMStart, handler.receivedHookPoint)
+	if handler.receivedHookPoint != NodeHookPreVMStart {
+		t.Fatalf("expected hook point %q, got %q", NodeHookPreVMStart, handler.receivedHookPoint)
 	}
 
 	if handler.receivedNodeName != "worker-1" {
@@ -320,10 +320,10 @@ func TestNodeHookAdapterCallsHandler(t *testing.T) {
 
 func TestNodeHookAdapterNilNodeContext(t *testing.T) {
 	handler := &recordingNodeHandler{}
-	adapter := &nodeHookAdapter{handlers: map[string]NodeHookHandler{PreVMStart: handler}}
+	adapter := &nodeHookAdapter{handlers: map[NodeHookPoint]NodeHookHandler{NodeHookPreVMStart: handler}}
 
 	_, err := adapter.ExecuteNodeHook(context.Background(), &pb.ExecuteNodeHookRequest{
-		HookPoint: PreVMStart,
+		HookPoint: string(NodeHookPreVMStart),
 		Vmi:       mustMarshalVMI(t, testVMI("test")),
 	})
 	if err != nil {
@@ -402,7 +402,7 @@ func TestServeRegistersNodeHookAdapter(t *testing.T) {
 	nodeSock := filepath.Join(tmpDir, "node.sock")
 
 	handler := &recordingNodeHandler{}
-	p := New("test-plugin").WithNodeHook(PreVMStart, NodeHandler(handler))
+	p := New("test-plugin").WithNodeHook(NodeHookPreVMStart, NodeHandler(handler))
 
 	stopCh := make(chan struct{})
 	errCh := make(chan error, 1)
@@ -416,7 +416,7 @@ func TestServeRegistersNodeHookAdapter(t *testing.T) {
 	client := pb.NewNodeHookServiceClient(conn)
 
 	_, err := client.ExecuteNodeHook(context.Background(), &pb.ExecuteNodeHookRequest{
-		HookPoint:   PreVMStart,
+		HookPoint:   string(NodeHookPreVMStart),
 		Vmi:         mustMarshalVMI(t, testVMI("node-test-vmi")),
 		NodeContext: &pb.NodeContext{NodeName: "test-node"},
 	})
@@ -424,8 +424,8 @@ func TestServeRegistersNodeHookAdapter(t *testing.T) {
 		t.Fatalf("ExecuteNodeHook RPC failed: %v", err)
 	}
 
-	if handler.receivedHookPoint != PreVMStart {
-		t.Fatalf("expected hook point %q, got %q", PreVMStart, handler.receivedHookPoint)
+	if handler.receivedHookPoint != NodeHookPreVMStart {
+		t.Fatalf("expected hook point %q, got %q", NodeHookPreVMStart, handler.receivedHookPoint)
 	}
 
 	if handler.receivedNodeName != "test-node" {
@@ -494,8 +494,8 @@ func TestDomainHookAdapterHandlerError(t *testing.T) {
 }
 
 func TestNodeHookAdapterUnregisteredHookPoint(t *testing.T) {
-	adapter := &nodeHookAdapter{handlers: map[string]NodeHookHandler{
-		PreVMStart: &recordingNodeHandler{},
+	adapter := &nodeHookAdapter{handlers: map[NodeHookPoint]NodeHookHandler{
+		NodeHookPreVMStart: &recordingNodeHandler{},
 	}}
 
 	_, err := adapter.ExecuteNodeHook(context.Background(), &pb.ExecuteNodeHookRequest{
@@ -513,12 +513,12 @@ func TestNodeHookAdapterUnregisteredHookPoint(t *testing.T) {
 }
 
 func TestNodeHookAdapterInvalidVMIJSON(t *testing.T) {
-	adapter := &nodeHookAdapter{handlers: map[string]NodeHookHandler{
-		PreVMStart: &recordingNodeHandler{},
+	adapter := &nodeHookAdapter{handlers: map[NodeHookPoint]NodeHookHandler{
+		NodeHookPreVMStart: &recordingNodeHandler{},
 	}}
 
 	_, err := adapter.ExecuteNodeHook(context.Background(), &pb.ExecuteNodeHookRequest{
-		HookPoint:   PreVMStart,
+		HookPoint:   string(NodeHookPreVMStart),
 		Vmi:         []byte("not-valid-json{{{"),
 		NodeContext: &pb.NodeContext{NodeName: "node-1"},
 	})
@@ -533,12 +533,12 @@ func TestNodeHookAdapterInvalidVMIJSON(t *testing.T) {
 
 func TestNodeHookAdapterHandlerError(t *testing.T) {
 	handlerErr := fmt.Errorf("node handler broke")
-	adapter := &nodeHookAdapter{handlers: map[string]NodeHookHandler{
-		PreVMStart: &errorNodeHandler{err: handlerErr},
+	adapter := &nodeHookAdapter{handlers: map[NodeHookPoint]NodeHookHandler{
+		NodeHookPreVMStart: &errorNodeHandler{err: handlerErr},
 	}}
 
 	_, err := adapter.ExecuteNodeHook(context.Background(), &pb.ExecuteNodeHookRequest{
-		HookPoint:   PreVMStart,
+		HookPoint:   string(NodeHookPreVMStart),
 		Vmi:         mustMarshalVMI(t, testVMI("test")),
 		NodeContext: &pb.NodeContext{NodeName: "node-1"},
 	})
@@ -623,8 +623,8 @@ func TestServeWithEntrypointFiltersNodeHooks(t *testing.T) {
 	handlerB := &recordingNodeHandler{}
 
 	p := New("test-plugin").
-		WithNodeHook(PreVMStart, NodeHandler(handlerA).WithEntrypoint("ep-a")).
-		WithNodeHook(PostVMStop, NodeHandler(handlerB).WithEntrypoint("ep-b"))
+		WithNodeHook(NodeHookPreVMStart, NodeHandler(handlerA).WithEntrypoint("ep-a")).
+		WithNodeHook(NodeHookPostVMStop, NodeHandler(handlerB).WithEntrypoint("ep-b"))
 
 	stopCh := make(chan struct{})
 	errCh := make(chan error, 1)
@@ -638,7 +638,7 @@ func TestServeWithEntrypointFiltersNodeHooks(t *testing.T) {
 	client := pb.NewNodeHookServiceClient(conn)
 
 	_, err := client.ExecuteNodeHook(context.Background(), &pb.ExecuteNodeHookRequest{
-		HookPoint:   PreVMStart,
+		HookPoint:   string(NodeHookPreVMStart),
 		Vmi:         mustMarshalVMI(t, testVMI("test")),
 		NodeContext: &pb.NodeContext{NodeName: "worker-1"},
 	})
@@ -646,8 +646,8 @@ func TestServeWithEntrypointFiltersNodeHooks(t *testing.T) {
 		t.Fatalf("ExecuteNodeHook RPC failed: %v", err)
 	}
 
-	if handlerA.receivedHookPoint != PreVMStart {
-		t.Fatalf("expected handler A to receive %q, got %q", PreVMStart, handlerA.receivedHookPoint)
+	if handlerA.receivedHookPoint != NodeHookPreVMStart {
+		t.Fatalf("expected handler A to receive %q, got %q", NodeHookPreVMStart, handlerA.receivedHookPoint)
 	}
 
 	if handlerB.receivedHookPoint != "" {
@@ -660,8 +660,8 @@ func TestServeWithEntrypointFiltersNodeHooks(t *testing.T) {
 
 func TestServeMixedEntrypointsWithoutFlagErrors(t *testing.T) {
 	p := New("test-plugin").
-		WithNodeHook(PreVMStart, NodeHandler(&stubNodeHandler{}).WithEntrypoint("ep-a")).
-		WithNodeHook(PostVMStop, NodeHandler(&stubNodeHandler{}).WithEntrypoint("ep-b"))
+		WithNodeHook(NodeHookPreVMStart, NodeHandler(&stubNodeHandler{}).WithEntrypoint("ep-a")).
+		WithNodeHook(NodeHookPostVMStop, NodeHandler(&stubNodeHandler{}).WithEntrypoint("ep-b"))
 
 	err := p.Serve()
 	if err == nil {
@@ -802,7 +802,7 @@ func TestChainedDomainHookSecondErrorPropagated(t *testing.T) {
 }
 
 func TestServeNonExistentEntrypointErrors(t *testing.T) {
-	p := New("test-plugin").WithNodeHook(PreVMStart, NodeHandler(&stubNodeHandler{}))
+	p := New("test-plugin").WithNodeHook(NodeHookPreVMStart, NodeHandler(&stubNodeHandler{}))
 
 	err := p.Serve(withEntrypoint("non-existent"))
 	if err == nil {
@@ -886,7 +886,7 @@ func TestServeWithSidecarArgsServesOnlyDomainHooks(t *testing.T) {
 
 			plugin := New("test-plugin").
 				WithDomainHook(ForLibvirt(&stubDomainHandler{}).WithEntrypoint(test.entrypoint)).
-				WithNodeHook(PreVMStart, NodeHandler(&stubNodeHandler{}).WithEntrypoint(test.entrypoint))
+				WithNodeHook(NodeHookPreVMStart, NodeHandler(&stubNodeHandler{}).WithEntrypoint(test.entrypoint))
 
 			stopCh := make(chan struct{})
 			errCh := serveWithArgs(t, plugin, plugin.sidecarArgs(plugin.resolveEntrypoint(test.entrypoint)), domainSock, nodeSock, stopCh)
@@ -915,7 +915,7 @@ func TestServeWithDaemonSetArgsServesOnlyNodeHooks(t *testing.T) {
 
 			plugin := New("test-plugin").
 				WithDomainHook(ForLibvirt(&stubDomainHandler{}).WithEntrypoint(test.entrypoint)).
-				WithNodeHook(PreVMStart, NodeHandler(&stubNodeHandler{}).WithEntrypoint(test.entrypoint))
+				WithNodeHook(NodeHookPreVMStart, NodeHandler(&stubNodeHandler{}).WithEntrypoint(test.entrypoint))
 
 			stopCh := make(chan struct{})
 			errCh := serveWithArgs(t, plugin, plugin.daemonSetArgs(plugin.resolveEntrypoint(test.entrypoint)), domainSock, nodeSock, stopCh)
@@ -931,7 +931,7 @@ func TestServeWithDaemonSetArgsServesOnlyNodeHooks(t *testing.T) {
 func TestServeWithDefaultEntrypointArgsAlongsideNamedEntrypoint(t *testing.T) {
 	plugin := New("test-plugin").
 		WithDomainHook(ForLibvirt(&stubDomainHandler{})).
-		WithNodeHook(PreVMStart, NodeHandler(&stubNodeHandler{})).
+		WithNodeHook(NodeHookPreVMStart, NodeHandler(&stubNodeHandler{})).
 		WithDomainHook(ForLibvirt(&stubDomainHandler{}).WithEntrypoint("ep-a"))
 
 	t.Run("sidecar", func(t *testing.T) {
@@ -1019,7 +1019,7 @@ func TestServeWithRoleWithoutMatchingHooksErrors(t *testing.T) {
 		role          string
 		expectedError string
 	}{
-		{name: "sidecar without domain hooks", plugin: New("test-plugin").WithNodeHook(PreVMStart, NodeHandler(&stubNodeHandler{})), role: roleSidecar, expectedError: "no domain hooks registered"},
+		{name: "sidecar without domain hooks", plugin: New("test-plugin").WithNodeHook(NodeHookPreVMStart, NodeHandler(&stubNodeHandler{})), role: roleSidecar, expectedError: "no domain hooks registered"},
 		{name: "daemonset without node hooks", plugin: New("test-plugin").WithDomainHook(ForLibvirt(&stubDomainHandler{})), role: roleDaemonSet, expectedError: "no node hooks registered"},
 	}
 
@@ -1040,7 +1040,7 @@ func TestServeWithRoleWithoutMatchingHooksErrors(t *testing.T) {
 func TestServeBothHookKindsWithoutRoleErrors(t *testing.T) {
 	plugin := New("test-plugin").
 		WithDomainHook(ForLibvirt(&stubDomainHandler{})).
-		WithNodeHook(PreVMStart, NodeHandler(&stubNodeHandler{}))
+		WithNodeHook(NodeHookPreVMStart, NodeHandler(&stubNodeHandler{}))
 
 	err := plugin.Serve()
 	if err == nil {

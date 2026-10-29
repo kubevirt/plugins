@@ -2,6 +2,7 @@ package plugin
 
 import (
 	"fmt"
+	"slices"
 	"time"
 
 	"github.com/kubevirt/plugins/pkg/sdk/cel"
@@ -34,7 +35,7 @@ func (o *DomainHookOption) isCEL() bool {
 }
 
 type NodeHookOption struct {
-	hookPoint       string
+	hookPoint       NodeHookPoint
 	handler         NodeHookHandler
 	condition       string
 	failureStrategy *FailureStrategy
@@ -62,18 +63,16 @@ func (p *Plugin) WithDomainHook(opt *DomainHookOption) *Plugin {
 	return p
 }
 
-func (p *Plugin) WithNodeHook(hookPoint string, opt *NodeHookOption) *Plugin {
-	valid := false
-	for _, hp := range AllHookPoints() {
-		if hp == hookPoint {
-			valid = true
-			break
-		}
+func (p *Plugin) WithNodeHook(hookPoint NodeHookPoint, opt *NodeHookOption) *Plugin {
+	if opt == nil || opt.handler == nil {
+		panic("node hook must have a handler")
 	}
-	if !valid {
-		panic(fmt.Sprintf("invalid hook point %q; valid hook points: %v", hookPoint, AllHookPoints()))
+	if !slices.Contains(AllNodeHookPoints(), hookPoint) {
+		panic(fmt.Sprintf("invalid hook point %q; valid hook points: %v", hookPoint, AllNodeHookPoints()))
 	}
 	resolvedEntrypoint := p.resolveEntrypoint(opt.entrypoint)
+	validateNodeSocketPath(NodeSocketPathForEntrypoint(p.name, resolvedEntrypoint))
+	validateK8sName("daemonset name", p.entrypointResourceName(resolvedEntrypoint))
 	for _, existingHook := range p.nodeHooks {
 		if existingHook.hookPoint == hookPoint && p.resolveEntrypoint(existingHook.entrypoint) == resolvedEntrypoint {
 			panic(fmt.Sprintf("duplicate hook point %q for entrypoint %q; each hook point can only be registered once per entrypoint", hookPoint, resolvedEntrypoint))
@@ -95,6 +94,7 @@ func (p *Plugin) WithCondition(condition string) *Plugin {
 }
 
 func (p *Plugin) WithFailureStrategy(strategy FailureStrategy) *Plugin {
+	validateFailureStrategy(strategy)
 	p.failureStrategy = strategy
 	return p
 }
@@ -150,16 +150,21 @@ func (o *DomainHookOption) WithCondition(condition string) *DomainHookOption {
 }
 
 func (o *DomainHookOption) WithFailureStrategy(strategy FailureStrategy) *DomainHookOption {
+	validateFailureStrategy(strategy)
 	o.failureStrategy = &strategy
 	return o
 }
 
 func (o *DomainHookOption) WithTimeout(timeout time.Duration) *DomainHookOption {
+	validateTimeout(timeout)
 	o.timeout = &timeout
 	return o
 }
 
 func NodeHandler(handler NodeHookHandler) *NodeHookOption {
+	if handler == nil {
+		panic("node hook must have a handler")
+	}
 	return &NodeHookOption{handler: handler}
 }
 
@@ -172,11 +177,13 @@ func (o *NodeHookOption) WithCondition(condition string) *NodeHookOption {
 }
 
 func (o *NodeHookOption) WithFailureStrategy(strategy FailureStrategy) *NodeHookOption {
+	validateFailureStrategy(strategy)
 	o.failureStrategy = &strategy
 	return o
 }
 
 func (o *NodeHookOption) WithTimeout(timeout time.Duration) *NodeHookOption {
+	validateTimeout(timeout)
 	o.timeout = &timeout
 	return o
 }
@@ -223,11 +230,41 @@ func validateK8sName(label, name string) {
 	}
 }
 
+func validateFailureStrategy(strategy FailureStrategy) {
+	if strategy != Fail && strategy != Ignore {
+		panic(fmt.Sprintf("invalid failure strategy %q; must be %q or %q", strategy, Fail, Ignore))
+	}
+}
+
+func validateTimeout(timeout time.Duration) {
+	if timeout <= 0 {
+		panic(fmt.Sprintf("timeout must be greater than zero, got %v", timeout))
+	}
+}
+
+// validateNodeSocketPath rejects paths Go cannot listen on. A non-abstract
+// unix socket path must leave room for the null terminator in sun_path's
+// 108 bytes, so 107 is the longest usable length; a path of exactly 108
+// bytes, which KubeVirt's CRD still accepts, already fails at listen time.
+func validateNodeSocketPath(path string) {
+	if len(path) > 107 {
+		panic(fmt.Sprintf("node socket path %q exceeds 107 bytes", path))
+	}
+}
+
 func (p *Plugin) resolveEntrypoint(entrypoint string) string {
 	if entrypoint == "" {
 		return p.name
 	}
 	return entrypoint
+}
+
+// entrypointResourceName returns the name of the per-entrypoint DaemonSet.
+func (p *Plugin) entrypointResourceName(entrypoint string) string {
+	if entrypoint == p.name {
+		return p.name
+	}
+	return p.name + "-" + entrypoint
 }
 
 func (p *Plugin) resolveImage() string {

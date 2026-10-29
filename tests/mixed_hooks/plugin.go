@@ -16,13 +16,13 @@ func (*domainHook) MutateDomain(_ context.Context, _ *libvirtxml.Domain, _ *v1.V
 
 type nodeHook struct{}
 
-func (*nodeHook) ExecuteNodeHook(_ context.Context, _ *plugin.NodeHookRequest) error {
-	return nil
+func (*nodeHook) ExecuteNodeHook(_ context.Context, _ *plugin.NodeHookRequest) (*plugin.NodeHookResponse, error) {
+	return nil, nil
 }
 
 func main() {
 	plugin.New("test-mixed-hooks").
 		WithDomainHook(plugin.ForLibvirt(&domainHook{})).
-		WithNodeHook(plugin.PreVMStart, plugin.NodeHandler(&nodeHook{})).
+		WithNodeHook(plugin.NodeHookPreVMStart, plugin.NodeHandler(&nodeHook{})).
 		Execute()
 }

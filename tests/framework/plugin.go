@@ -24,8 +24,8 @@ func (*NoopDomainHandler) MutateDomain(_ context.Context, _ *libvirtxml.Domain, 
 
 type NoopNodeHandler struct{}
 
-func (*NoopNodeHandler) ExecuteNodeHook(_ context.Context, _ *plugin.NodeHookRequest) error {
-	return nil
+func (*NoopNodeHandler) ExecuteNodeHook(_ context.Context, _ *plugin.NodeHookRequest) (*plugin.NodeHookResponse, error) {
+	return nil, nil
 }
 
 func (f *Framework) DeployPlugin(p *plugin.Plugin, namespace string) {

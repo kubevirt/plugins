@@ -13,7 +13,7 @@ var _ = Describe("Mixed Hooks Plugin", func() {
 
 		p := plugin.New("test-mixed-hooks").
 			WithDomainHook(plugin.ForLibvirt(&framework.NoopDomainHandler{})).
-			WithNodeHook(plugin.PreVMStart, plugin.NodeHandler(&framework.NoopNodeHandler{})).
+			WithNodeHook(plugin.NodeHookPreVMStart, plugin.NodeHandler(&framework.NoopNodeHandler{})).
 			WithNamespace(ns).
 			WithImage(framework.TestContext.ContainerPrefix + "/mixed_hooks:latest")
 

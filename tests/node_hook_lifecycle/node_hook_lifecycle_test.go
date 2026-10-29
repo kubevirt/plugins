@@ -12,7 +12,7 @@ var _ = Describe("Node Hook Lifecycle", func() {
 		ns := framework.TestContext.Namespace
 
 		p := plugin.New("test-node-hook").
-			WithNodeHook(plugin.PreVMStart, plugin.NodeHandler(&framework.NoopNodeHandler{})).
+			WithNodeHook(plugin.NodeHookPreVMStart, plugin.NodeHandler(&framework.NoopNodeHandler{})).
 			WithNamespace(ns).
 			WithImage(framework.TestContext.ContainerPrefix + "/node_hook_lifecycle:latest")
 

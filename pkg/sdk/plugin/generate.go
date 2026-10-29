@@ -412,7 +412,7 @@ func (p *Plugin) renderPluginCR() (string, error) {
 	for _, nodeHook := range p.nodeHooks {
 		entrypoint := p.resolveEntrypoint(nodeHook.entrypoint)
 		nodeHookData := nodeHookTmplData{
-			HookPoint: nodeHook.hookPoint,
+			HookPoint: string(nodeHook.hookPoint),
 			Socket:    NodeSocketPathForEntrypoint(p.name, entrypoint),
 		}
 		if nodeHook.condition != "" {
@@ -431,11 +431,6 @@ func (p *Plugin) renderPluginCR() (string, error) {
 }
 
 func (p *Plugin) renderDaemonSet(entrypoint string) (string, error) {
-	name := p.name
-	if entrypoint != p.name {
-		name = p.name + "-" + entrypoint
-	}
-
 	data := struct {
 		Name               string
 		PluginName         string
@@ -444,7 +439,7 @@ func (p *Plugin) renderDaemonSet(entrypoint string) (string, error) {
 		ServiceAccountName string
 		Args               []string
 	}{
-		Name:            name,
+		Name:            p.entrypointResourceName(entrypoint),
 		PluginName:      p.name,
 		Image:           p.resolveImage(),
 		ImagePullPolicy: p.imagePullPolicy,
