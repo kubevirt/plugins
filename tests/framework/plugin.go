@@ -32,9 +32,19 @@ func (f *Framework) DeployPlugin(p *plugin.Plugin, namespace string) {
 	outputDir, err := os.MkdirTemp("", "plugin-deploy-")
 	ExpectWithOffset(1, err).NotTo(HaveOccurred())
 
+	// Generate also writes a Dockerfile and Makefile into the current
+	// directory and reads the Go version from its go.mod; run it in a
+	// scratch directory so the repository's own files are left alone.
+	sourceDir, err := os.MkdirTemp("", "plugin-source-")
+	ExpectWithOffset(1, err).NotTo(HaveOccurred())
+	defer os.RemoveAll(sourceDir) //nolint:errcheck
+	goMod, err := os.ReadFile(filepath.Join(f.RepoRoot, "go.mod"))
+	ExpectWithOffset(1, err).NotTo(HaveOccurred())
+	ExpectWithOffset(1, os.WriteFile(filepath.Join(sourceDir, "go.mod"), goMod, 0644)).To(Succeed())
+
 	origDir, err := os.Getwd()
 	ExpectWithOffset(1, err).NotTo(HaveOccurred())
-	ExpectWithOffset(1, os.Chdir(f.RepoRoot)).To(Succeed())
+	ExpectWithOffset(1, os.Chdir(sourceDir)).To(Succeed())
 	defer os.Chdir(origDir) //nolint:errcheck
 
 	ExpectWithOffset(1, p.Generate(outputDir)).To(Succeed())
