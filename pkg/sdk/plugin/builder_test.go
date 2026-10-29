@@ -80,9 +80,9 @@ func TestWithMultipleNodeHooks(t *testing.T) {
 }
 
 func TestWithConditionSetsPluginLevelCondition(t *testing.T) {
-	p := New("test").WithCondition("vmi.metadata.name == 'test'")
+	p := New("test").WithCondition("vmi.Name == 'test'")
 
-	if p.condition != "vmi.metadata.name == 'test'" {
+	if p.condition != "vmi.Name == 'test'" {
 		t.Fatalf("expected condition to be set, got %q", p.condition)
 	}
 }
@@ -101,14 +101,14 @@ func TestDomainHookPerHookSettings(t *testing.T) {
 
 	p := New("test").WithDomainHook(
 		ForLibvirt(handler).
-			WithCondition("domainSpec.Type == 'kvm'").
+			WithCondition("vmi.Spec.Domain.CPU.Cores > 2").
 			WithFailureStrategy(Ignore).
 			WithTimeout(timeout),
 	)
 
 	domainHook := p.domainHooks[0]
 
-	if domainHook.condition != "domainSpec.Type == 'kvm'" {
+	if domainHook.condition != "vmi.Spec.Domain.CPU.Cores > 2" {
 		t.Fatalf("expected condition, got %q", domainHook.condition)
 	}
 
@@ -127,7 +127,7 @@ func TestNodeHookPerHookSettings(t *testing.T) {
 
 	p := New("test").WithNodeHook(PreVMStart,
 		NodeHandler(handler).
-			WithCondition("vmi.metadata.name == 'test'").
+			WithCondition("vmi.Name == 'test'").
 			WithFailureStrategy(Fail).
 			WithTimeout(timeout),
 	)
@@ -137,7 +137,7 @@ func TestNodeHookPerHookSettings(t *testing.T) {
 
 	nodeHook := p.nodeHooks[0]
 
-	if nodeHook.condition != "vmi.metadata.name == 'test'" {
+	if nodeHook.condition != "vmi.Name == 'test'" {
 		t.Fatalf("expected condition, got %q", nodeHook.condition)
 	}
 
@@ -158,7 +158,7 @@ func TestFluentChaining(t *testing.T) {
 		WithDomainHook(ForLibvirt(domainHandler)).
 		WithNodeHook(PreVMStart, NodeHandler(nodeHandler)).
 		WithNodeHook(PostVMStop, NodeHandler(nodeHandler)).
-		WithCondition("vmi.metadata.name == 'test'").
+		WithCondition("vmi.Name == 'test'").
 		WithFailureStrategy(Ignore)
 
 	if p.name != "full-plugin" {
@@ -173,7 +173,7 @@ func TestFluentChaining(t *testing.T) {
 		t.Fatalf("expected 2 node hooks, got %d", len(p.nodeHooks))
 	}
 
-	if p.condition != "vmi.metadata.name == 'test'" {
+	if p.condition != "vmi.Name == 'test'" {
 		t.Fatalf("expected condition, got %q", p.condition)
 	}
 
@@ -459,19 +459,34 @@ func TestWithInvalidPluginLevelCELConditionPanics(t *testing.T) {
 	New("test").WithCondition("invalid >>><< expression")
 }
 
+func TestWithEmptyConditionSucceeds(t *testing.T) {
+	p := New("test").
+		WithCondition("").
+		WithDomainHook(ForLibvirt(&stubDomainHandler{}).WithCondition("")).
+		WithNodeHook(PreVMStart, NodeHandler(&stubNodeHandler{}).WithCondition(""))
+
+	if len(p.domainHooks) != 1 || p.domainHooks[0].condition != "" {
+		t.Fatal("expected domain hook with empty condition to be registered")
+	}
+
+	if len(p.nodeHooks) != 1 || p.nodeHooks[0].condition != "" {
+		t.Fatal("expected node hook with empty condition to be registered")
+	}
+}
+
 func TestWithValidCELConditionSucceeds(t *testing.T) {
-	domainOpt := ForLibvirt(&stubDomainHandler{}).WithCondition("domainSpec.Type == 'kvm'")
-	if domainOpt.condition != "domainSpec.Type == 'kvm'" {
+	domainOpt := ForLibvirt(&stubDomainHandler{}).WithCondition("vmi.Spec.Domain.CPU.Cores > 2")
+	if domainOpt.condition != "vmi.Spec.Domain.CPU.Cores > 2" {
 		t.Fatalf("expected domain hook condition to be set, got %q", domainOpt.condition)
 	}
 
-	nodeOpt := NodeHandler(&stubNodeHandler{}).WithCondition("vmi.metadata.name == 'test'")
-	if nodeOpt.condition != "vmi.metadata.name == 'test'" {
+	nodeOpt := NodeHandler(&stubNodeHandler{}).WithCondition("vmi.Name == 'test'")
+	if nodeOpt.condition != "vmi.Name == 'test'" {
 		t.Fatalf("expected node hook condition to be set, got %q", nodeOpt.condition)
 	}
 
-	p := New("test").WithCondition("vmi.metadata.name == 'test'")
-	if p.condition != "vmi.metadata.name == 'test'" {
+	p := New("test").WithCondition("vmi.Name == 'test'")
+	if p.condition != "vmi.Name == 'test'" {
 		t.Fatalf("expected plugin condition to be set, got %q", p.condition)
 	}
 }

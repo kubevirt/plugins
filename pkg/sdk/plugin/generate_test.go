@@ -368,7 +368,7 @@ func TestGeneratePluginCRWithCondition(t *testing.T) {
 
 	p := New("test-plugin").
 		WithNodeHook(PreVMStart, NodeHandler(&stubNodeHandler{})).
-		WithCondition("vmi.metadata.name == 'test'")
+		WithCondition("vmi.Name == 'test'")
 	if err := p.generate(outputDir, sourceDir); err != nil {
 		t.Fatal(err)
 	}
@@ -376,7 +376,7 @@ func TestGeneratePluginCRWithCondition(t *testing.T) {
 	var cr testPluginCR
 	readAndUnmarshal(t, findGeneratedFile(t, outputDir, "plugin.yaml"), &cr)
 
-	if cr.Spec.Condition != "vmi.metadata.name == 'test'" {
+	if cr.Spec.Condition != "vmi.Name == 'test'" {
 		t.Fatalf("expected condition, got %q", cr.Spec.Condition)
 	}
 }
@@ -388,7 +388,7 @@ func TestGeneratePluginCRWithPerHookSettings(t *testing.T) {
 	timeout := 30 * time.Second
 	p := New("test-plugin").WithNodeHook(PreVMStart,
 		NodeHandler(&stubNodeHandler{}).
-			WithCondition("vmi.metadata.name == 'test'").
+			WithCondition("vmi.Name == 'test'").
 			WithFailureStrategy(Ignore).
 			WithTimeout(timeout),
 	)
@@ -405,7 +405,7 @@ func TestGeneratePluginCRWithPerHookSettings(t *testing.T) {
 
 	nodeHook := cr.Spec.NodeHooks[0]
 
-	if nodeHook.Condition != "vmi.metadata.name == 'test'" {
+	if nodeHook.Condition != "vmi.Name == 'test'" {
 		t.Fatalf("expected per-hook condition, got %q", nodeHook.Condition)
 	}
 

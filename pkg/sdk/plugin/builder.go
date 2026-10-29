@@ -87,7 +87,7 @@ func (p *Plugin) WithNodeHook(hookPoint string, opt *NodeHookOption) *Plugin {
 }
 
 func (p *Plugin) WithCondition(condition string) *Plugin {
-	if err := cel.ValidateNodeHookCondition(condition); err != nil {
+	if err := cel.ValidateCondition(condition); err != nil {
 		panic(fmt.Sprintf("invalid plugin-level CEL condition: %v", err))
 	}
 	p.condition = condition
@@ -131,7 +131,7 @@ func CELDomainHook(expression string) *DomainHookOption {
 	if expression == "" {
 		panic("CEL domain hook expression must not be empty")
 	}
-	if err := cel.ValidateDomainCELExpression(expression); err != nil {
+	if err := cel.ValidateGuestDefinitionExpression(expression); err != nil {
 		panic(fmt.Sprintf("invalid CEL domain hook expression: %v", err))
 	}
 	return &DomainHookOption{expression: expression}
@@ -142,7 +142,7 @@ func (p *Plugin) WithDomainCELHook(expression string) *Plugin {
 }
 
 func (o *DomainHookOption) WithCondition(condition string) *DomainHookOption {
-	if err := cel.ValidateDomainHookCondition(condition); err != nil {
+	if err := cel.ValidateCondition(condition); err != nil {
 		panic(fmt.Sprintf("invalid domain hook CEL condition: %v", err))
 	}
 	o.condition = condition
@@ -164,7 +164,7 @@ func NodeHandler(handler NodeHookHandler) *NodeHookOption {
 }
 
 func (o *NodeHookOption) WithCondition(condition string) *NodeHookOption {
-	if err := cel.ValidateNodeHookCondition(condition); err != nil {
+	if err := cel.ValidateCondition(condition); err != nil {
 		panic(fmt.Sprintf("invalid node hook CEL condition: %v", err))
 	}
 	o.condition = condition
