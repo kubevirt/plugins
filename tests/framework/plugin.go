@@ -77,6 +77,10 @@ func (f *Framework) kubectlApply(dir, namespace string) {
 	}
 }
 
+func (f *Framework) kubectlCommand(args ...string) *exec.Cmd {
+	return exec.CommandContext(context.Background(), f.Kubectl, append([]string{"--kubeconfig", f.Kubeconfig}, args...)...)
+}
+
 func (f *Framework) kubectlDelete(dir, namespace string) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -87,18 +91,13 @@ func (f *Framework) kubectlDelete(dir, namespace string) {
 		if filepath.Ext(entries[i].Name()) != ".yaml" {
 			continue
 		}
-		cmd := exec.CommandContext(context.Background(),
-			filepath.Join(f.RepoRoot, "cluster", "kubectl.sh"),
-			"delete", "-f", filepath.Join(dir, entries[i].Name()), "-n", namespace, "--ignore-not-found")
-		cmd.Dir = f.RepoRoot
+		cmd := f.kubectlCommand("delete", "-f", filepath.Join(dir, entries[i].Name()), "-n", namespace, "--ignore-not-found")
 		cmd.CombinedOutput() //nolint:errcheck
 	}
 }
 
 func (f *Framework) kubectl(args ...string) []byte {
-	cmd := exec.CommandContext(context.Background(), filepath.Join(f.RepoRoot, "cluster", "kubectl.sh"), args...)
-	cmd.Dir = f.RepoRoot
-	output, err := cmd.CombinedOutput()
+	output, err := f.kubectlCommand(args...).CombinedOutput()
 	ExpectWithOffset(2, err).NotTo(HaveOccurred(), "kubectl %v failed: %s", args, string(output))
 	return output
 }

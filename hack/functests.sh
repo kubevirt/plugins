@@ -37,8 +37,13 @@ fi
 # before running it, so -kubeconfig must be an absolute path - hence the two
 # different values below rather than one path shared across both branches.
 # hack/dockerized always bind-mounts the repo root at /workspace.
+#
+# The suites call the kubevirtci kubectl binary directly instead of
+# cluster/kubectl.sh, because kubevirtci's wrapper refuses to run without a
+# container runtime, which the builder container does not have. The paths
+# differ between the two branches for the same reason as -kubeconfig.
 if [ "${KUBEVIRT_PLUGINS_SKIP_DOCKERIZED:-}" = "true" ]; then
-    go run github.com/onsi/ginkgo/v2/ginkgo "${ARGS[@]}" ./tests/... -- -kubeconfig="${KUBECONFIG}" --container-prefix="${manifest_docker_prefix}" --artifacts="${ARTIFACTS}"
+    go run github.com/onsi/ginkgo/v2/ginkgo "${ARGS[@]}" ./tests/... -- -kubeconfig="${KUBECONFIG}" --kubectl="${kubectl}" --container-prefix="${manifest_docker_prefix}" --artifacts="${ARTIFACTS}"
 else
-    DOCKERIZED_EXTRA_ARGS="--network=host" hack/dockerized go run github.com/onsi/ginkgo/v2/ginkgo "${ARGS[@]}" ./tests/... -- -kubeconfig="/workspace/_kubevirtci/_ci-configs/${KUBEVIRT_PROVIDER}/.kubeconfig" --container-prefix="${manifest_docker_prefix}" --artifacts="${ARTIFACTS}"
+    DOCKERIZED_EXTRA_ARGS="--network=host" hack/dockerized go run github.com/onsi/ginkgo/v2/ginkgo "${ARGS[@]}" ./tests/... -- -kubeconfig="/workspace/_kubevirtci/_ci-configs/${KUBEVIRT_PROVIDER}/.kubeconfig" --kubectl="/workspace/_kubevirtci/_ci-configs/${KUBEVIRT_PROVIDER}/.kubectl" --container-prefix="${manifest_docker_prefix}" --artifacts="${ARTIFACTS}"
 fi
