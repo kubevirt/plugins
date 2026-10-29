@@ -15,7 +15,9 @@ import (
 
 	pb "github.com/kubevirt/plugins/api/hooks/v1alpha1"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/status"
 	v1 "kubevirt.io/api/core/v1"
 	"libvirt.org/go/libvirtxml"
 )
@@ -195,14 +197,14 @@ func TestDomainHookAdapterMutatesDomain(t *testing.T) {
 	adapter := &domainHookAdapter{handler: handler}
 
 	vmi := testVMI("test-vmi")
-	resp, err := adapter.MutateDomain(context.Background(), &pb.MutateDomainRequest{
+	resp, err := adapter.GuestDefinition(context.Background(), &pb.GuestDefinitionRequest{
 		DomainType:     "libvirt",
 		Domain:         testDomainXML(t, "original"),
 		Vmi:            mustMarshalVMI(t, vmi),
 		SidecarContext: &pb.SidecarContext{},
 	})
 	if err != nil {
-		t.Fatalf("MutateDomain failed: %v", err)
+		t.Fatalf("GuestDefinition failed: %v", err)
 	}
 
 	var result libvirtxml.Domain
@@ -224,13 +226,13 @@ func TestDomainHookAdapterPassthroughUnknownDomainType(t *testing.T) {
 	adapter := &domainHookAdapter{handler: handler}
 
 	originalDomain := []byte("<some-unknown-format/>")
-	resp, err := adapter.MutateDomain(context.Background(), &pb.MutateDomainRequest{
+	resp, err := adapter.GuestDefinition(context.Background(), &pb.GuestDefinitionRequest{
 		DomainType: "mshv",
 		Domain:     originalDomain,
 		Vmi:        mustMarshalVMI(t, testVMI("test")),
 	})
 	if err != nil {
-		t.Fatalf("MutateDomain failed: %v", err)
+		t.Fatalf("GuestDefinition failed: %v", err)
 	}
 
 	if string(resp.Domain) != string(originalDomain) {
@@ -242,14 +244,14 @@ func TestDomainHookAdapterPassesInvocationContext(t *testing.T) {
 	handler := &contextRecordingHandler{}
 	adapter := &domainHookAdapter{handler: handler}
 
-	_, err := adapter.MutateDomain(context.Background(), &pb.MutateDomainRequest{
+	_, err := adapter.GuestDefinition(context.Background(), &pb.GuestDefinitionRequest{
 		DomainType:     "libvirt",
 		Domain:         testDomainXML(t, "test"),
 		Vmi:            mustMarshalVMI(t, testVMI("test")),
 		SidecarContext: &pb.SidecarContext{InvocationContext: "my-invocation-context"},
 	})
 	if err != nil {
-		t.Fatalf("MutateDomain failed: %v", err)
+		t.Fatalf("GuestDefinition failed: %v", err)
 	}
 
 	if handler.receivedInvocationContext != "my-invocation-context" {
@@ -261,17 +263,31 @@ func TestDomainHookAdapterNilSidecarContext(t *testing.T) {
 	handler := &contextRecordingHandler{}
 	adapter := &domainHookAdapter{handler: handler}
 
-	_, err := adapter.MutateDomain(context.Background(), &pb.MutateDomainRequest{
+	_, err := adapter.GuestDefinition(context.Background(), &pb.GuestDefinitionRequest{
 		DomainType: "libvirt",
 		Domain:     testDomainXML(t, "test"),
 		Vmi:        mustMarshalVMI(t, testVMI("test")),
 	})
 	if err != nil {
-		t.Fatalf("MutateDomain failed: %v", err)
+		t.Fatalf("GuestDefinition failed: %v", err)
 	}
 
 	if handler.receivedInvocationContext != "" {
 		t.Fatalf("expected empty invocation context, got %q", handler.receivedInvocationContext)
+	}
+}
+
+func TestDomainHookAdapterUnimplementedHookPoints(t *testing.T) {
+	adapter := &domainHookAdapter{handler: &stubDomainHandler{}}
+
+	_, err := adapter.PreBoot(context.Background(), &pb.PreBootRequest{})
+	if status.Code(err) != codes.Unimplemented {
+		t.Fatalf("expected Unimplemented from PreBoot, got %v", err)
+	}
+
+	_, err = adapter.PreMigrationSource(context.Background(), &pb.PreMigrationSourceRequest{})
+	if status.Code(err) != codes.Unimplemented {
+		t.Fatalf("expected Unimplemented from PreMigrationSource, got %v", err)
 	}
 }
 
@@ -356,16 +372,16 @@ func TestServeRegistersDomainHookAdapter(t *testing.T) {
 	waitForSocket(t, domainSock)
 
 	conn := dialSocket(t, domainSock)
-	client := pb.NewDomainHookServiceClient(conn)
+	client := pb.NewLauncherHookServiceClient(conn)
 
-	resp, err := client.MutateDomain(context.Background(), &pb.MutateDomainRequest{
+	resp, err := client.GuestDefinition(context.Background(), &pb.GuestDefinitionRequest{
 		DomainType:     "libvirt",
 		Domain:         testDomainXML(t, "original"),
 		Vmi:            mustMarshalVMI(t, testVMI("grpc-test-vmi")),
 		SidecarContext: &pb.SidecarContext{},
 	})
 	if err != nil {
-		t.Fatalf("MutateDomain RPC failed: %v", err)
+		t.Fatalf("GuestDefinition RPC failed: %v", err)
 	}
 
 	var result libvirtxml.Domain
@@ -425,7 +441,7 @@ func TestServeRegistersNodeHookAdapter(t *testing.T) {
 func TestDomainHookAdapterInvalidXML(t *testing.T) {
 	adapter := &domainHookAdapter{handler: &mutatingDomainHandler{}}
 
-	_, err := adapter.MutateDomain(context.Background(), &pb.MutateDomainRequest{
+	_, err := adapter.GuestDefinition(context.Background(), &pb.GuestDefinitionRequest{
 		DomainType:     "libvirt",
 		Domain:         []byte("not-valid-xml{{{"),
 		Vmi:            mustMarshalVMI(t, testVMI("test")),
@@ -443,7 +459,7 @@ func TestDomainHookAdapterInvalidXML(t *testing.T) {
 func TestDomainHookAdapterInvalidVMIJSON(t *testing.T) {
 	adapter := &domainHookAdapter{handler: &mutatingDomainHandler{}}
 
-	_, err := adapter.MutateDomain(context.Background(), &pb.MutateDomainRequest{
+	_, err := adapter.GuestDefinition(context.Background(), &pb.GuestDefinitionRequest{
 		DomainType:     "libvirt",
 		Domain:         testDomainXML(t, "test"),
 		Vmi:            []byte("not-valid-json{{{"),
@@ -462,7 +478,7 @@ func TestDomainHookAdapterHandlerError(t *testing.T) {
 	handlerErr := fmt.Errorf("handler broke")
 	adapter := &domainHookAdapter{handler: &errorDomainHandler{err: handlerErr}}
 
-	_, err := adapter.MutateDomain(context.Background(), &pb.MutateDomainRequest{
+	_, err := adapter.GuestDefinition(context.Background(), &pb.GuestDefinitionRequest{
 		DomainType:     "libvirt",
 		Domain:         testDomainXML(t, "test"),
 		Vmi:            mustMarshalVMI(t, testVMI("test")),
@@ -566,16 +582,16 @@ func TestServeWithEntrypointFiltersDomainHooks(t *testing.T) {
 	waitForSocket(t, domainSock)
 
 	conn := dialSocket(t, domainSock)
-	client := pb.NewDomainHookServiceClient(conn)
+	client := pb.NewLauncherHookServiceClient(conn)
 
-	resp, err := client.MutateDomain(context.Background(), &pb.MutateDomainRequest{
+	resp, err := client.GuestDefinition(context.Background(), &pb.GuestDefinitionRequest{
 		DomainType:     "libvirt",
 		Domain:         testDomainXML(t, "original"),
 		Vmi:            mustMarshalVMI(t, testVMI("test")),
 		SidecarContext: &pb.SidecarContext{},
 	})
 	if err != nil {
-		t.Fatalf("MutateDomain RPC failed: %v", err)
+		t.Fatalf("GuestDefinition RPC failed: %v", err)
 	}
 
 	var result libvirtxml.Domain
@@ -695,16 +711,16 @@ func TestServeMultipleDomainHooksSameEntrypoint(t *testing.T) {
 	waitForSocket(t, domainSock)
 
 	conn := dialSocket(t, domainSock)
-	client := pb.NewDomainHookServiceClient(conn)
+	client := pb.NewLauncherHookServiceClient(conn)
 
-	resp, err := client.MutateDomain(context.Background(), &pb.MutateDomainRequest{
+	resp, err := client.GuestDefinition(context.Background(), &pb.GuestDefinitionRequest{
 		DomainType:     "libvirt",
 		Domain:         testDomainXML(t, "original"),
 		Vmi:            mustMarshalVMI(t, testVMI("test")),
 		SidecarContext: &pb.SidecarContext{},
 	})
 	if err != nil {
-		t.Fatalf("MutateDomain RPC failed: %v", err)
+		t.Fatalf("GuestDefinition RPC failed: %v", err)
 	}
 
 	var result libvirtxml.Domain
@@ -829,16 +845,16 @@ func TestServeMixedSidecarAndCEL(t *testing.T) {
 	waitForSocket(t, domainSock)
 
 	conn := dialSocket(t, domainSock)
-	client := pb.NewDomainHookServiceClient(conn)
+	client := pb.NewLauncherHookServiceClient(conn)
 
-	resp, err := client.MutateDomain(context.Background(), &pb.MutateDomainRequest{
+	resp, err := client.GuestDefinition(context.Background(), &pb.GuestDefinitionRequest{
 		DomainType:     "libvirt",
 		Domain:         testDomainXML(t, "original"),
 		Vmi:            mustMarshalVMI(t, testVMI("test")),
 		SidecarContext: &pb.SidecarContext{},
 	})
 	if err != nil {
-		t.Fatalf("MutateDomain RPC failed: %v", err)
+		t.Fatalf("GuestDefinition RPC failed: %v", err)
 	}
 
 	var result libvirtxml.Domain

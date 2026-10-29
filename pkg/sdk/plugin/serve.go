@@ -16,6 +16,8 @@ import (
 
 	pb "github.com/kubevirt/plugins/api/hooks/v1alpha1"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	v1 "kubevirt.io/api/core/v1"
 	"libvirt.org/go/libvirtxml"
 )
@@ -33,12 +35,12 @@ type domainHookAdapter struct {
 	handler LibvirtDomainHookHandler
 }
 
-func (a *domainHookAdapter) MutateDomain(ctx context.Context, req *pb.MutateDomainRequest) (*pb.MutateDomainResponse, error) {
+func (a *domainHookAdapter) GuestDefinition(ctx context.Context, req *pb.GuestDefinitionRequest) (*pb.GuestDefinitionResponse, error) {
 	invCtx := req.GetSidecarContext().GetInvocationContext()
 	ctx = context.WithValue(ctx, invocationContextKey, invCtx)
 
 	if req.GetDomainType() != "libvirt" {
-		return &pb.MutateDomainResponse{Domain: req.GetDomain()}, nil
+		return &pb.GuestDefinitionResponse{Domain: req.GetDomain()}, nil
 	}
 
 	var domain libvirtxml.Domain
@@ -60,7 +62,15 @@ func (a *domainHookAdapter) MutateDomain(ctx context.Context, req *pb.MutateDoma
 		return nil, fmt.Errorf("failed to marshal domain XML: %w", err)
 	}
 
-	return &pb.MutateDomainResponse{Domain: []byte(xmlStr)}, nil
+	return &pb.GuestDefinitionResponse{Domain: []byte(xmlStr)}, nil
+}
+
+func (a *domainHookAdapter) PreBoot(ctx context.Context, req *pb.PreBootRequest) (*pb.PreBootResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "PreBoot is not implemented by this plugin")
+}
+
+func (a *domainHookAdapter) PreMigrationSource(ctx context.Context, req *pb.PreMigrationSourceRequest) (*pb.PreMigrationSourceResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "PreMigrationSource is not implemented by this plugin")
 }
 
 type nodeHookAdapter struct {
@@ -258,7 +268,7 @@ func (p *Plugin) Serve(opts ...serveOption) error {
 		}
 
 		server := grpc.NewServer()
-		pb.RegisterDomainHookServiceServer(server, &domainHookAdapter{handler: handler})
+		pb.RegisterLauncherHookServiceServer(server, &domainHookAdapter{handler: handler})
 
 		listener, err := listenUnix(options.domainSocketPath)
 		if err != nil {

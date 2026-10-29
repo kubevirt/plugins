@@ -27,7 +27,15 @@ vet:
 	go vet ./...
 endif
 
-.PHONY: test vet cluster-up cluster-down cluster-sync deploy-kubevirt build-test-plugins functest
+# update-proto and verify-proto run on the host like the cluster targets:
+# they only need bash, curl or git, and diff, not a Go toolchain.
+update-proto:
+	./hack/update-proto.sh
+
+verify-proto:
+	./hack/verify-proto.sh
+
+.PHONY: test vet update-proto verify-proto cluster-up cluster-down cluster-sync deploy-kubevirt build-test-plugins functest
 
 cluster-up:
 	./cluster/up.sh
