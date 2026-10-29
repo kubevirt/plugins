@@ -1,6 +1,7 @@
 package framework
 
 import (
+	"bytes"
 	"context"
 	"strings"
 	"time"
@@ -67,6 +68,16 @@ func WithCPULimit(limit string) VMIOption {
 			vmi.Spec.Domain.Resources.Limits = corev1.ResourceList{}
 		}
 		vmi.Spec.Domain.Resources.Limits[corev1.ResourceCPU] = resource.MustParse(limit)
+	}
+}
+
+// WithSerialConsoleLog sets spec.domain.devices.logSerialConsole, which makes
+// virt-launcher log the serial console and the launcher pod gain a
+// guest-console-log container whose logs expose it.
+func WithSerialConsoleLog() VMIOption {
+	return func(vmi *v1.VirtualMachineInstance) {
+		enabled := true
+		vmi.Spec.Domain.Devices.LogSerialConsole = &enabled
 	}
 }
 
@@ -208,6 +219,32 @@ func (f *Framework) LauncherDomainXML(namespace, vmiName string) string {
 
 	output := f.kubectl(append([]string{"exec", "-n", namespace, pod.Name, "-c", "compute", "--"}, command...)...)
 	return string(output)
+}
+
+// LauncherExec runs a command in the virt-launcher pod's compute container,
+// like KubeVirt's own e2e tests, and returns its standard output. The command
+// must succeed; its standard error is captured separately so that it does not
+// pollute the output, and is included in the failure message.
+func (f *Framework) LauncherExec(namespace, vmiName string, command ...string) string {
+	pod := f.GetLauncherPod(namespace, vmiName)
+	cmd := f.kubectlCommand(append([]string{"exec", "-n", namespace, pod.Name, "-c", "compute", "--"}, command...)...)
+
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "exec %v in the compute container of pod %s/%s failed: %s", command, namespace, pod.Name, stderr.String())
+	return stdout.String()
+}
+
+// GuestConsoleLog returns the current guest console log of a launcher pod
+// whose VMI logs the serial console (see WithSerialConsoleLog), and the error
+// from fetching it. Unlike ContainerLogs it does not fail the spec on fetch
+// errors, so it can be used inside Eventually callbacks where transient
+// failures should retry.
+func (f *Framework) GuestConsoleLog(namespace, podName string) (string, error) {
+	logs, err := f.KubeClient.CoreV1().Pods(namespace).GetLogs(podName, &corev1.PodLogOptions{Container: "guest-console-log"}).DoRaw(context.Background())
+	return string(logs), err
 }
 
 // GetLauncherPod returns the virt-launcher pod of a VMI, waiting until it is running.
