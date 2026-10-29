@@ -459,10 +459,7 @@ func (p *Plugin) renderDaemonSet(entrypoint string) (string, error) {
 }
 
 func (p *Plugin) daemonSetArgs(entrypoint string) []string {
-	if entrypoint == p.name {
-		return nil
-	}
-	return []string{"--entrypoint", entrypoint}
+	return []string{"--entrypoint", entrypoint, "--role", roleDaemonSet}
 }
 
 func (p *Plugin) renderRBAC() (string, error) {
@@ -490,19 +487,14 @@ func (p *Plugin) renderMAP(entrypoint string) (string, error) {
 		containerName = "plugin-sidecar-" + p.name + "-" + entrypoint
 	}
 
-	var args string
-	if serveArgs := p.sidecarArgs(entrypoint); len(serveArgs) > 0 {
-		args = fmt.Sprintf(`,
-            command: %s`, celStringList(append([]string{"/plugin", "serve"}, serveArgs...)))
-	}
-
 	jsonPatchExpr := fmt.Sprintf(`'[
     JSONPatch{
         op: "add",
         path: "/spec/containers/-",
         value: Object.spec.containers{
             name: %q,
-            image: %q%s,
+            image: %q,
+            args: %s,
             securityContext: Object.spec.containers.securityContext{
                 allowPrivilegeEscalation: false,
                 runAsNonRoot: true,
@@ -520,7 +512,7 @@ func (p *Plugin) renderMAP(entrypoint string) (string, error) {
             }]
         }
     }
-]'`, containerName, p.resolveImage(), args, PluginSocketsVolumeName, p.name, p.name)
+]'`, containerName, p.resolveImage(), celStringList(p.sidecarArgs(entrypoint)), PluginSocketsVolumeName, p.name, p.name)
 
 	data := struct {
 		Name                    string
@@ -536,10 +528,7 @@ func (p *Plugin) renderMAP(entrypoint string) (string, error) {
 }
 
 func (p *Plugin) sidecarArgs(entrypoint string) []string {
-	if entrypoint == p.name {
-		return nil
-	}
-	return []string{"--entrypoint", entrypoint}
+	return []string{"--entrypoint", entrypoint, "--role", roleSidecar}
 }
 
 func celStringList(items []string) string {

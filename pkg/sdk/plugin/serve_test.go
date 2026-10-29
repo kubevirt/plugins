@@ -3,6 +3,8 @@ package plugin
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"flag"
 	"fmt"
 	"net"
 	"os"
@@ -941,4 +943,95 @@ func TestServeWithDefaultEntrypointArgsAlongsideNamedEntrypoint(t *testing.T) {
 		close(stopCh)
 		awaitServeStop(t, errCh)
 	})
+}
+
+func TestParseServeArgs(t *testing.T) {
+	serveOpts, err := parseServeArgs([]string{"--entrypoint", "ep-a", "--role", roleSidecar})
+	if err != nil {
+		t.Fatalf("parseServeArgs failed: %v", err)
+	}
+
+	options := &serveOptions{}
+	for _, opt := range serveOpts {
+		opt(options)
+	}
+
+	if options.entrypoint != "ep-a" {
+		t.Fatalf("expected entrypoint %q, got %q", "ep-a", options.entrypoint)
+	}
+
+	if options.role != roleSidecar {
+		t.Fatalf("expected role %q, got %q", roleSidecar, options.role)
+	}
+}
+
+func TestParseServeArgsRejectsInvalidArgs(t *testing.T) {
+	tests := []struct {
+		name          string
+		args          []string
+		expectedError string
+	}{
+		{name: "unknown role", args: []string{"--role", "controller"}, expectedError: "unknown role"},
+		{name: "unexpected argument", args: []string{"--entrypoint", "ep-a", "sidecar"}, expectedError: "unexpected arguments"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := parseServeArgs(test.args)
+			if err == nil {
+				t.Fatalf("expected error for args %v", test.args)
+			}
+
+			if !strings.Contains(err.Error(), test.expectedError) {
+				t.Fatalf("expected %q error, got: %v", test.expectedError, err)
+			}
+		})
+	}
+}
+
+func TestParseServeArgsHelp(t *testing.T) {
+	_, err := parseServeArgs([]string{"--help"})
+	if !errors.Is(err, flag.ErrHelp) {
+		t.Fatalf("expected flag.ErrHelp, got %v", err)
+	}
+}
+
+func TestServeWithRoleWithoutMatchingHooksErrors(t *testing.T) {
+	tests := []struct {
+		name          string
+		plugin        *Plugin
+		role          string
+		expectedError string
+	}{
+		{name: "sidecar without domain hooks", plugin: New("test-plugin").WithNodeHook(PreVMStart, NodeHandler(&stubNodeHandler{})), role: roleSidecar, expectedError: "no domain hooks registered"},
+		{name: "daemonset without node hooks", plugin: New("test-plugin").WithDomainHook(ForLibvirt(&stubDomainHandler{})), role: roleDaemonSet, expectedError: "no node hooks registered"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			err := test.plugin.Serve(withRole(test.role))
+			if err == nil {
+				t.Fatalf("expected error when serving role %q without matching hooks", test.role)
+			}
+
+			if !strings.Contains(err.Error(), test.expectedError) {
+				t.Fatalf("expected %q error, got: %v", test.expectedError, err)
+			}
+		})
+	}
+}
+
+func TestServeBothHookKindsWithoutRoleErrors(t *testing.T) {
+	plugin := New("test-plugin").
+		WithDomainHook(ForLibvirt(&stubDomainHandler{})).
+		WithNodeHook(PreVMStart, NodeHandler(&stubNodeHandler{}))
+
+	err := plugin.Serve()
+	if err == nil {
+		t.Fatal("expected error when serving domain and node hooks without a role")
+	}
+
+	if !strings.Contains(err.Error(), "use --role") {
+		t.Fatalf("expected error to suggest --role, got: %v", err)
+	}
 }

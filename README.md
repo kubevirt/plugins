@@ -131,7 +131,11 @@ p := plugin.New("my-plugin").
 ```
 
 Running `generate` produces per-entrypoint DaemonSets and MutatingAdmissionPolicies.
-Each container runs with `--entrypoint <name>` to serve only its subset of hooks.
+Each container runs `serve --entrypoint <name> --role sidecar|daemonset` to serve only its
+subset of hooks: domain hooks in sidecars, node hooks in DaemonSets.
+
+The manifests pass these flags as container `args`, which override the image's `CMD`, so
+plugin images must use `ENTRYPOINT ["<binary>", "serve"]`, like the generated `Dockerfile`.
 
 ## Limitations
 
