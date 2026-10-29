@@ -133,6 +133,13 @@ p := plugin.New("my-plugin").
 Running `generate` produces per-entrypoint DaemonSets and MutatingAdmissionPolicies.
 Each container runs with `--entrypoint <name>` to serve only its subset of hooks.
 
+## Limitations
+
+virt-launcher round-trips the domain through its vendored [libvirtxml](https://pkg.go.dev/libvirt.org/go/libvirtxml)
+around domain hooks, silently dropping elements and attributes it does not model, whatever a hook returns.
+Supporting a new element needs upstream libvirtxml support and a KubeVirt release that vendors it.
+In KubeVirt v1.9 this applies to every VM once any Plugin exists, not only VMs a hook selects.
+
 ## Project Structure
 
 ```
