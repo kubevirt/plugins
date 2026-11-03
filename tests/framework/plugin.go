@@ -8,12 +8,12 @@ import (
 	"strings"
 	"time"
 
+	"github.com/kubevirt/plugins/pkg/sdk/plugin"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
-	"github.com/kubevirt/plugins/pkg/sdk/plugin"
-	"libvirt.org/go/libvirtxml"
-	v1 "kubevirt.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	v1 "kubevirt.io/api/core/v1"
+	"libvirt.org/go/libvirtxml"
 )
 
 type NoopDomainHandler struct{}
@@ -32,9 +32,19 @@ func (f *Framework) DeployPlugin(p *plugin.Plugin, namespace string) {
 	outputDir, err := os.MkdirTemp("", "plugin-deploy-")
 	ExpectWithOffset(1, err).NotTo(HaveOccurred())
 
+	// Generate also writes a Dockerfile and Makefile into the current
+	// directory and reads the Go version from its go.mod; run it in a
+	// scratch directory so the repository's own files are left alone.
+	sourceDir, err := os.MkdirTemp("", "plugin-source-")
+	ExpectWithOffset(1, err).NotTo(HaveOccurred())
+	defer os.RemoveAll(sourceDir) //nolint:errcheck
+	goMod, err := os.ReadFile(filepath.Join(f.RepoRoot, "go.mod"))
+	ExpectWithOffset(1, err).NotTo(HaveOccurred())
+	ExpectWithOffset(1, os.WriteFile(filepath.Join(sourceDir, "go.mod"), goMod, 0644)).To(Succeed())
+
 	origDir, err := os.Getwd()
 	ExpectWithOffset(1, err).NotTo(HaveOccurred())
-	ExpectWithOffset(1, os.Chdir(f.RepoRoot)).To(Succeed())
+	ExpectWithOffset(1, os.Chdir(sourceDir)).To(Succeed())
 	defer os.Chdir(origDir) //nolint:errcheck
 
 	ExpectWithOffset(1, p.Generate(outputDir)).To(Succeed())
@@ -77,6 +87,10 @@ func (f *Framework) kubectlApply(dir, namespace string) {
 	}
 }
 
+func (f *Framework) kubectlCommand(args ...string) *exec.Cmd {
+	return exec.CommandContext(context.Background(), f.Kubectl, append([]string{"--kubeconfig", f.Kubeconfig}, args...)...)
+}
+
 func (f *Framework) kubectlDelete(dir, namespace string) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -87,18 +101,13 @@ func (f *Framework) kubectlDelete(dir, namespace string) {
 		if filepath.Ext(entries[i].Name()) != ".yaml" {
 			continue
 		}
-		cmd := exec.CommandContext(context.Background(),
-			filepath.Join(f.RepoRoot, "cluster", "kubectl.sh"),
-			"delete", "-f", filepath.Join(dir, entries[i].Name()), "-n", namespace, "--ignore-not-found")
-		cmd.Dir = f.RepoRoot
+		cmd := f.kubectlCommand("delete", "-f", filepath.Join(dir, entries[i].Name()), "-n", namespace, "--ignore-not-found")
 		cmd.CombinedOutput() //nolint:errcheck
 	}
 }
 
 func (f *Framework) kubectl(args ...string) []byte {
-	cmd := exec.CommandContext(context.Background(), filepath.Join(f.RepoRoot, "cluster", "kubectl.sh"), args...)
-	cmd.Dir = f.RepoRoot
-	output, err := cmd.CombinedOutput()
+	output, err := f.kubectlCommand(args...).CombinedOutput()
 	ExpectWithOffset(2, err).NotTo(HaveOccurred(), "kubectl %v failed: %s", args, string(output))
 	return output
 }

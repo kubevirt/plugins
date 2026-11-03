@@ -3,6 +3,8 @@ package plugin
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"flag"
 	"fmt"
 	"log"
 	"net"
@@ -89,6 +91,11 @@ func (a *nodeHookAdapter) ExecuteNodeHook(ctx context.Context, req *pb.ExecuteNo
 	return &pb.ExecuteNodeHookResponse{}, nil
 }
 
+const (
+	roleSidecar   = "sidecar"
+	roleDaemonSet = "daemonset"
+)
+
 type serveOption func(*serveOptions)
 
 type serveOptions struct {
@@ -96,6 +103,7 @@ type serveOptions struct {
 	nodeSocketPath   string
 	stopCh           <-chan struct{}
 	entrypoint       string
+	role             string
 }
 
 func withDomainSocketPath(path string) serveOption {
@@ -112,6 +120,10 @@ func withStopCh(ch <-chan struct{}) serveOption {
 
 func withEntrypoint(entrypoint string) serveOption {
 	return func(options *serveOptions) { options.entrypoint = entrypoint }
+}
+
+func withRole(role string) serveOption {
+	return func(options *serveOptions) { options.role = role }
 }
 
 type chainedDomainHandler struct {
@@ -204,6 +216,23 @@ func (p *Plugin) Serve(opts ...serveOption) error {
 		effectiveEntrypoint = allEntrypoints[0]
 		domainHooks = p.domainHooksForEntrypoint(effectiveEntrypoint)
 		nodeHooks = p.nodeHooksForEntrypoint(effectiveEntrypoint)
+	}
+
+	switch options.role {
+	case roleSidecar:
+		if len(domainHooks) == 0 {
+			return fmt.Errorf("no domain hooks registered for entrypoint %q; nothing to serve with --role %s", effectiveEntrypoint, roleSidecar)
+		}
+		nodeHooks = nil
+	case roleDaemonSet:
+		if len(nodeHooks) == 0 {
+			return fmt.Errorf("no node hooks registered for entrypoint %q; nothing to serve with --role %s", effectiveEntrypoint, roleDaemonSet)
+		}
+		domainHooks = nil
+	default:
+		if len(domainHooks) > 0 && len(nodeHooks) > 0 {
+			return fmt.Errorf("entrypoint %q has both domain and node hooks; use --role %s or --role %s to select which to serve", effectiveEntrypoint, roleSidecar, roleDaemonSet)
+		}
 	}
 
 	if len(domainHooks) > 0 && options.domainSocketPath == "" {
@@ -313,12 +342,12 @@ func (p *Plugin) Execute() {
 
 	switch os.Args[1] {
 	case "serve":
-		var serveOpts []serveOption
-		for i := 2; i < len(os.Args); i++ {
-			if os.Args[i] == "--entrypoint" && i+1 < len(os.Args) {
-				serveOpts = append(serveOpts, withEntrypoint(os.Args[i+1]))
-				i++
-			}
+		serveOpts, err := parseServeArgs(os.Args[2:])
+		if errors.Is(err, flag.ErrHelp) {
+			return
+		}
+		if err != nil {
+			log.Fatalf("serve failed: %v", err)
 		}
 		if err := p.Serve(serveOpts...); err != nil {
 			log.Fatalf("serve failed: %v", err)
@@ -335,4 +364,23 @@ func (p *Plugin) Execute() {
 		fmt.Fprintf(os.Stderr, "Unknown subcommand %q. Usage: %s <serve|generate> [args...]\n", os.Args[1], os.Args[0])
 		os.Exit(1)
 	}
+}
+
+func parseServeArgs(args []string) ([]serveOption, error) {
+	flags := flag.NewFlagSet("serve", flag.ContinueOnError)
+	entrypoint := flags.String("entrypoint", "", "serve only the hooks of this entrypoint")
+	role := flags.String("role", "", fmt.Sprintf("serve only the domain hooks (%s) or only the node hooks (%s)", roleSidecar, roleDaemonSet))
+	if err := flags.Parse(args); err != nil {
+		return nil, err
+	}
+
+	if flags.NArg() > 0 {
+		return nil, fmt.Errorf("unexpected arguments %v", flags.Args())
+	}
+
+	if *role != "" && *role != roleSidecar && *role != roleDaemonSet {
+		return nil, fmt.Errorf("unknown role %q; must be %q or %q", *role, roleSidecar, roleDaemonSet)
+	}
+
+	return []serveOption{withEntrypoint(*entrypoint), withRole(*role)}, nil
 }

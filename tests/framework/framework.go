@@ -16,6 +16,7 @@ var TestContext *Framework
 
 var (
 	suiteKubeconfig      string
+	suiteKubectl         string
 	suiteContainerPrefix string
 	suiteArtifactsDir    string
 )
@@ -23,6 +24,8 @@ var (
 type Framework struct {
 	KubeClient      kubernetes.Interface
 	DynamicClient   dynamic.Interface
+	Kubeconfig      string
+	Kubectl         string
 	ContainerPrefix string
 	ArtifactsDir    string
 	RepoRoot        string
@@ -31,13 +34,14 @@ type Framework struct {
 
 func SetupSuite() bool {
 	flag.StringVar(&suiteKubeconfig, "kubeconfig", "", "path to kubeconfig file")
+	flag.StringVar(&suiteKubectl, "kubectl", "kubectl", "kubectl binary used to apply generated plugin manifests")
 	flag.StringVar(&suiteContainerPrefix, "container-prefix", "", "container image prefix for in-cluster references (e.g. registry:5000/kubevirt)")
 	flag.StringVar(&suiteArtifactsDir, "artifacts", "_out/artifacts", "directory for test artifacts on failure")
 
 	BeforeSuite(func() {
 		Expect(suiteKubeconfig).NotTo(BeEmpty(), "-kubeconfig flag is required")
 		Expect(suiteContainerPrefix).NotTo(BeEmpty(), "--container-prefix flag is required")
-		initialize(suiteKubeconfig, suiteContainerPrefix, suiteArtifactsDir)
+		initialize(suiteKubeconfig, suiteKubectl, suiteContainerPrefix, suiteArtifactsDir)
 	})
 
 	BeforeEach(func() {
@@ -48,7 +52,7 @@ func SetupSuite() bool {
 	return true
 }
 
-func initialize(kubeconfig, containerPrefix, artifactsDir string) {
+func initialize(kubeconfig, kubectl, containerPrefix, artifactsDir string) {
 	config, err := clientcmd.BuildConfigFromFlags("", kubeconfig)
 	if err != nil {
 		panic("failed to build kubeconfig: " + err.Error())
@@ -67,6 +71,8 @@ func initialize(kubeconfig, containerPrefix, artifactsDir string) {
 	TestContext = &Framework{
 		KubeClient:      kubeClient,
 		DynamicClient:   dynamicClient,
+		Kubeconfig:      kubeconfig,
+		Kubectl:         kubectl,
 		ContainerPrefix: containerPrefix,
 		ArtifactsDir:    artifactsDir,
 		RepoRoot:        discoverRepoRoot(),

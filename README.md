@@ -11,6 +11,18 @@ This repo provides:
 - **SDK** (`pkg/sdk/plugin`) - A Go framework for developing domain hooks and node hooks with minimal boilerplate.
 - **Catalog** (`plugins/`) - A collection of community plugins (coming soon).
 
+## Compatibility
+
+SDK `vX.Y.Z` targets KubeVirt `vX.Y` and uses that release's `kubevirt.io/api` and vendored libvirtxml.
+
+| SDK | KubeVirt | kubevirt.io/api | libvirtxml | Go |
+|-----|----------|-----------------|------------|----|
+| v1.9.x | v1.9.x | v1.9.1 | v1.12002.0 | >= 1.24 |
+
+The plugin API is alpha: a new minor may break plugins, yet Go tooling treats it as a compatible upgrade.
+Pin the minor matching your cluster's KubeVirt (`go get github.com/kubevirt/plugins@v1.9`), update with
+`go get -u=patch`, and limit dependency bots to patch updates. See [RELEASING.md](RELEASING.md).
+
 ## Example: SMBIOS Manufacturer Injector
 
 A domain hook plugin that sets a custom SMBIOS manufacturer based on the VMI name.
@@ -119,7 +131,18 @@ p := plugin.New("my-plugin").
 ```
 
 Running `generate` produces per-entrypoint DaemonSets and MutatingAdmissionPolicies.
-Each container runs with `--entrypoint <name>` to serve only its subset of hooks.
+Each container runs `serve --entrypoint <name> --role sidecar|daemonset` to serve only its
+subset of hooks: domain hooks in sidecars, node hooks in DaemonSets.
+
+The manifests pass these flags as container `args`, which override the image's `CMD`, so
+plugin images must use `ENTRYPOINT ["<binary>", "serve"]`, like the generated `Dockerfile`.
+
+## Limitations
+
+virt-launcher round-trips the domain through its vendored [libvirtxml](https://pkg.go.dev/libvirt.org/go/libvirtxml)
+around domain hooks, silently dropping elements and attributes it does not model, whatever a hook returns.
+Supporting a new element needs upstream libvirtxml support and a KubeVirt release that vendors it.
+In KubeVirt v1.9 this applies to every VM once any Plugin exists, not only VMs a hook selects.
 
 ## Project Structure
 

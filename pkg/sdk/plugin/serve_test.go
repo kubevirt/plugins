@@ -3,8 +3,11 @@ package plugin
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"flag"
 	"fmt"
 	"net"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -133,6 +136,56 @@ func awaitServeStop(t *testing.T, errCh <-chan error) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("serve did not stop within timeout")
 	}
+}
+
+func waitForSocketWhileServing(t *testing.T, path string, errCh <-chan error) {
+	t.Helper()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		select {
+		case err := <-errCh:
+			t.Fatalf("serve returned before socket %s became connectable: %v", path, err)
+		default:
+		}
+
+		conn, err := net.DialTimeout("unix", path, 100*time.Millisecond)
+		if err == nil {
+			conn.Close()
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	t.Fatalf("socket %s did not become connectable within timeout", path)
+}
+
+// unservableSocketPath returns a socket path under a regular file, so serving on it fails.
+func unservableSocketPath(t *testing.T) string {
+	t.Helper()
+
+	notADirectory := filepath.Join(t.TempDir(), "not-a-directory")
+	if err := os.WriteFile(notADirectory, nil, 0644); err != nil {
+		t.Fatalf("failed to create %s: %v", notADirectory, err)
+	}
+
+	return filepath.Join(notADirectory, "x.sock")
+}
+
+func serveWithArgs(t *testing.T, plugin *Plugin, args []string, domainSock, nodeSock string, stopCh <-chan struct{}) <-chan error {
+	t.Helper()
+
+	serveOpts, err := parseServeArgs(args)
+	if err != nil {
+		t.Fatalf("failed to parse serve args %v: %v", args, err)
+	}
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- plugin.Serve(append(serveOpts, withDomainSocketPath(domainSock), withNodeSocketPath(nodeSock), withStopCh(stopCh))...)
+	}()
+
+	return errCh
 }
 
 // --- Adapter unit tests ---
@@ -799,4 +852,186 @@ func TestServeMixedSidecarAndCEL(t *testing.T) {
 
 	close(stopCh)
 	awaitServeStop(t, errCh)
+}
+
+func TestServeWithSidecarArgsServesOnlyDomainHooks(t *testing.T) {
+	tests := []struct {
+		name       string
+		entrypoint string
+	}{
+		{name: "default entrypoint"},
+		{name: "named entrypoint", entrypoint: "ep-a"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			domainSock := filepath.Join(t.TempDir(), "domain.sock")
+			nodeSock := unservableSocketPath(t)
+
+			plugin := New("test-plugin").
+				WithDomainHook(ForLibvirt(&stubDomainHandler{}).WithEntrypoint(test.entrypoint)).
+				WithNodeHook(PreVMStart, NodeHandler(&stubNodeHandler{}).WithEntrypoint(test.entrypoint))
+
+			stopCh := make(chan struct{})
+			errCh := serveWithArgs(t, plugin, plugin.sidecarArgs(plugin.resolveEntrypoint(test.entrypoint)), domainSock, nodeSock, stopCh)
+
+			waitForSocketWhileServing(t, domainSock, errCh)
+
+			close(stopCh)
+			awaitServeStop(t, errCh)
+		})
+	}
+}
+
+func TestServeWithDaemonSetArgsServesOnlyNodeHooks(t *testing.T) {
+	tests := []struct {
+		name       string
+		entrypoint string
+	}{
+		{name: "default entrypoint"},
+		{name: "named entrypoint", entrypoint: "ep-a"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			domainSock := unservableSocketPath(t)
+			nodeSock := filepath.Join(t.TempDir(), "node.sock")
+
+			plugin := New("test-plugin").
+				WithDomainHook(ForLibvirt(&stubDomainHandler{}).WithEntrypoint(test.entrypoint)).
+				WithNodeHook(PreVMStart, NodeHandler(&stubNodeHandler{}).WithEntrypoint(test.entrypoint))
+
+			stopCh := make(chan struct{})
+			errCh := serveWithArgs(t, plugin, plugin.daemonSetArgs(plugin.resolveEntrypoint(test.entrypoint)), domainSock, nodeSock, stopCh)
+
+			waitForSocketWhileServing(t, nodeSock, errCh)
+
+			close(stopCh)
+			awaitServeStop(t, errCh)
+		})
+	}
+}
+
+func TestServeWithDefaultEntrypointArgsAlongsideNamedEntrypoint(t *testing.T) {
+	plugin := New("test-plugin").
+		WithDomainHook(ForLibvirt(&stubDomainHandler{})).
+		WithNodeHook(PreVMStart, NodeHandler(&stubNodeHandler{})).
+		WithDomainHook(ForLibvirt(&stubDomainHandler{}).WithEntrypoint("ep-a"))
+
+	t.Run("sidecar", func(t *testing.T) {
+		domainSock := filepath.Join(t.TempDir(), "domain.sock")
+		nodeSock := filepath.Join(t.TempDir(), "node.sock")
+
+		stopCh := make(chan struct{})
+		errCh := serveWithArgs(t, plugin, plugin.sidecarArgs("test-plugin"), domainSock, nodeSock, stopCh)
+
+		waitForSocketWhileServing(t, domainSock, errCh)
+
+		close(stopCh)
+		awaitServeStop(t, errCh)
+	})
+
+	t.Run("daemonset", func(t *testing.T) {
+		domainSock := filepath.Join(t.TempDir(), "domain.sock")
+		nodeSock := filepath.Join(t.TempDir(), "node.sock")
+
+		stopCh := make(chan struct{})
+		errCh := serveWithArgs(t, plugin, plugin.daemonSetArgs("test-plugin"), domainSock, nodeSock, stopCh)
+
+		waitForSocketWhileServing(t, nodeSock, errCh)
+
+		close(stopCh)
+		awaitServeStop(t, errCh)
+	})
+}
+
+func TestParseServeArgs(t *testing.T) {
+	serveOpts, err := parseServeArgs([]string{"--entrypoint", "ep-a", "--role", roleSidecar})
+	if err != nil {
+		t.Fatalf("parseServeArgs failed: %v", err)
+	}
+
+	options := &serveOptions{}
+	for _, opt := range serveOpts {
+		opt(options)
+	}
+
+	if options.entrypoint != "ep-a" {
+		t.Fatalf("expected entrypoint %q, got %q", "ep-a", options.entrypoint)
+	}
+
+	if options.role != roleSidecar {
+		t.Fatalf("expected role %q, got %q", roleSidecar, options.role)
+	}
+}
+
+func TestParseServeArgsRejectsInvalidArgs(t *testing.T) {
+	tests := []struct {
+		name          string
+		args          []string
+		expectedError string
+	}{
+		{name: "unknown role", args: []string{"--role", "controller"}, expectedError: "unknown role"},
+		{name: "unexpected argument", args: []string{"--entrypoint", "ep-a", "sidecar"}, expectedError: "unexpected arguments"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := parseServeArgs(test.args)
+			if err == nil {
+				t.Fatalf("expected error for args %v", test.args)
+			}
+
+			if !strings.Contains(err.Error(), test.expectedError) {
+				t.Fatalf("expected %q error, got: %v", test.expectedError, err)
+			}
+		})
+	}
+}
+
+func TestParseServeArgsHelp(t *testing.T) {
+	_, err := parseServeArgs([]string{"--help"})
+	if !errors.Is(err, flag.ErrHelp) {
+		t.Fatalf("expected flag.ErrHelp, got %v", err)
+	}
+}
+
+func TestServeWithRoleWithoutMatchingHooksErrors(t *testing.T) {
+	tests := []struct {
+		name          string
+		plugin        *Plugin
+		role          string
+		expectedError string
+	}{
+		{name: "sidecar without domain hooks", plugin: New("test-plugin").WithNodeHook(PreVMStart, NodeHandler(&stubNodeHandler{})), role: roleSidecar, expectedError: "no domain hooks registered"},
+		{name: "daemonset without node hooks", plugin: New("test-plugin").WithDomainHook(ForLibvirt(&stubDomainHandler{})), role: roleDaemonSet, expectedError: "no node hooks registered"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			err := test.plugin.Serve(withRole(test.role))
+			if err == nil {
+				t.Fatalf("expected error when serving role %q without matching hooks", test.role)
+			}
+
+			if !strings.Contains(err.Error(), test.expectedError) {
+				t.Fatalf("expected %q error, got: %v", test.expectedError, err)
+			}
+		})
+	}
+}
+
+func TestServeBothHookKindsWithoutRoleErrors(t *testing.T) {
+	plugin := New("test-plugin").
+		WithDomainHook(ForLibvirt(&stubDomainHandler{})).
+		WithNodeHook(PreVMStart, NodeHandler(&stubNodeHandler{}))
+
+	err := plugin.Serve()
+	if err == nil {
+		t.Fatal("expected error when serving domain and node hooks without a role")
+	}
+
+	if !strings.Contains(err.Error(), "use --role") {
+		t.Fatalf("expected error to suggest --role, got: %v", err)
+	}
 }

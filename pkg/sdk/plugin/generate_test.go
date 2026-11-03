@@ -3,10 +3,12 @@ package plugin
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
+	celgo "github.com/google/cel-go/cel"
 	"gopkg.in/yaml.v2"
 	rbacv1 "k8s.io/api/rbac/v1"
 )
@@ -254,6 +256,19 @@ func splitYAMLDocuments(content string) []string {
 	}
 
 	return docs
+}
+
+func mustParseCEL(t *testing.T, expression string) {
+	t.Helper()
+
+	env, err := celgo.NewEnv()
+	if err != nil {
+		t.Fatalf("failed to create CEL environment: %v", err)
+	}
+
+	if _, issues := env.Parse(expression); issues.Err() != nil {
+		t.Fatalf("expected a valid CEL expression: %v\n%s", issues.Err(), expression)
+	}
 }
 
 // Tests
@@ -690,6 +705,12 @@ func TestGenerateMAP(t *testing.T) {
 	if !strings.Contains(expr, "/var/run/kubevirt-plugin/test-plugin/") {
 		t.Fatalf("expected JSONPatch expression to contain mountPath, got:\n%s", expr)
 	}
+
+	if !strings.Contains(expr, `args: ["--entrypoint", "test-plugin", "--role", "sidecar"]`) {
+		t.Fatalf("expected JSONPatch expression to pass sidecar args, got:\n%s", expr)
+	}
+
+	mustParseCEL(t, expr)
 }
 
 func TestGenerateMAPBinding(t *testing.T) {
@@ -724,8 +745,8 @@ func TestGenerateDockerfile(t *testing.T) {
 
 	content := readFileContent(t, filepath.Join(sourceDir, "Dockerfile"))
 
-	if !strings.Contains(content, "FROM golang:1.23.0 AS builder") {
-		t.Fatalf("expected Dockerfile to contain Go version 1.23.0, got:\n%s", content)
+	if !strings.Contains(content, "FROM golang:1.26 AS builder") {
+		t.Fatalf("expected Dockerfile to contain Go version 1.26, got:\n%s", content)
 	}
 
 	if !strings.Contains(content, `ENTRYPOINT ["/plugin", "serve"]`) {
@@ -756,8 +777,8 @@ func TestGenerateMakefile(t *testing.T) {
 		t.Fatalf("expected Makefile to contain docker fallback, got:\n%s", content)
 	}
 
-	if !strings.Contains(content, "GO_VERSION ?= 1.23.0") {
-		t.Fatalf("expected Makefile to contain GO_VERSION from go.mod, got:\n%s", content)
+	if !strings.Contains(content, "GO_VERSION ?= 1.26") {
+		t.Fatalf("expected Makefile to contain GO_VERSION 1.26, got:\n%s", content)
 	}
 
 	if !strings.Contains(content, "go test ./...") {
@@ -766,6 +787,27 @@ func TestGenerateMakefile(t *testing.T) {
 
 	if !strings.Contains(content, "go vet ./...") {
 		t.Fatalf("expected Makefile to contain vet target, got:\n%s", content)
+	}
+}
+
+func TestBuilderGoVersion(t *testing.T) {
+	tests := []struct {
+		goDirective string
+		expected    string
+	}{
+		{goDirective: "1.24.0", expected: "1.26"},
+		{goDirective: "1.26", expected: "1.26"},
+		{goDirective: "1.26.3", expected: "1.26"},
+		{goDirective: "1.27.1", expected: "1.27"},
+		{goDirective: "not-a-version", expected: "1.26"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.goDirective, func(t *testing.T) {
+			if got := builderGoVersion(test.goDirective); got != test.expected {
+				t.Fatalf("builderGoVersion(%q) = %q, expected %q", test.goDirective, got, test.expected)
+			}
+		})
 	}
 }
 
@@ -1032,13 +1074,39 @@ func TestGenerateDaemonSetContainerArgs(t *testing.T) {
 
 	container := ds.Spec.Template.Spec.Containers[0]
 
-	if len(container.Args) != 2 || container.Args[0] != "--entrypoint" || container.Args[1] != "ep-a" {
-		t.Fatalf("expected args [--entrypoint ep-a], got %v", container.Args)
+	expectedArgs := []string{"--entrypoint", "ep-a", "--role", "daemonset"}
+	if !slices.Equal(container.Args, expectedArgs) {
+		t.Fatalf("expected args %v, got %v", expectedArgs, container.Args)
 	}
 
 	if !strings.Contains(container.Image, "test-plugin") {
 		t.Fatalf("expected image to use plugin name, got %q", container.Image)
 	}
+}
+
+func TestGenerateMAPContainerArgs(t *testing.T) {
+	sourceDir := setupSourceDir(t)
+	outputDir := filepath.Join(t.TempDir(), "deploy")
+
+	plugin := New("test-plugin").
+		WithDomainHook(ForLibvirt(&stubDomainHandler{}).WithEntrypoint("ep-a"))
+	if err := plugin.generate(outputDir, sourceDir); err != nil {
+		t.Fatal(err)
+	}
+
+	var policy testMAP
+	readAndUnmarshal(t, findGeneratedFile(t, outputDir, "ep-a-mutating-admission-policy.yaml"), &policy)
+
+	expr := policy.Spec.Mutations[0].JSONPatch.Expression
+	if !strings.Contains(expr, `args: ["--entrypoint", "ep-a", "--role", "sidecar"]`) {
+		t.Fatalf("expected JSONPatch expression to pass sidecar args, got:\n%s", expr)
+	}
+
+	if strings.Contains(expr, "command:") {
+		t.Fatalf("expected JSONPatch expression to keep the image entrypoint, got:\n%s", expr)
+	}
+
+	mustParseCEL(t, expr)
 }
 
 func TestGenerateSingleEntrypointBackwardCompat(t *testing.T) {
@@ -1065,8 +1133,9 @@ func TestGenerateSingleEntrypointBackwardCompat(t *testing.T) {
 	}
 
 	container := ds.Spec.Template.Spec.Containers[0]
-	if len(container.Args) != 0 {
-		t.Fatalf("expected no args for default entrypoint, got %v", container.Args)
+	expectedArgs := []string{"--entrypoint", "test-plugin", "--role", "daemonset"}
+	if !slices.Equal(container.Args, expectedArgs) {
+		t.Fatalf("expected args %v, got %v", expectedArgs, container.Args)
 	}
 
 	var m testMAP
@@ -1077,7 +1146,7 @@ func TestGenerateSingleEntrypointBackwardCompat(t *testing.T) {
 	}
 }
 
-func TestGenerateDefaultEntrypointNoArgsSuffix(t *testing.T) {
+func TestGenerateDefaultEntrypointDaemonSetArgs(t *testing.T) {
 	sourceDir := setupSourceDir(t)
 	outputDir := filepath.Join(t.TempDir(), "deploy")
 
@@ -1090,8 +1159,9 @@ func TestGenerateDefaultEntrypointNoArgsSuffix(t *testing.T) {
 	readAndUnmarshal(t, findGeneratedFile(t, outputDir, "daemonset.yaml"), &ds)
 
 	container := ds.Spec.Template.Spec.Containers[0]
-	if len(container.Args) != 0 {
-		t.Fatalf("expected no args for default entrypoint, got %v", container.Args)
+	expectedArgs := []string{"--entrypoint", "test-plugin", "--role", "daemonset"}
+	if !slices.Equal(container.Args, expectedArgs) {
+		t.Fatalf("expected args %v, got %v", expectedArgs, container.Args)
 	}
 }
 

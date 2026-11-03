@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"go/version"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"text/template"
 
@@ -327,6 +329,7 @@ func (p *Plugin) generate(outputDir, sourceDir string) error {
 		if err != nil {
 			return err
 		}
+		goVersion = builderGoVersion(goVersion)
 		dockerfileContent, err := renderTemplate(dockerfileTmplStr, struct{ GoVersion string }{goVersion})
 		if err != nil {
 			return err
@@ -445,16 +448,18 @@ func (p *Plugin) renderDaemonSet(entrypoint string) (string, error) {
 		PluginName:      p.name,
 		Image:           p.resolveImage(),
 		ImagePullPolicy: p.imagePullPolicy,
+		Args:            p.daemonSetArgs(entrypoint),
 	}
 
 	if len(p.rbacRules) > 0 {
 		data.ServiceAccountName = p.name
 	}
-	if entrypoint != p.name {
-		data.Args = []string{"--entrypoint", entrypoint}
-	}
 
 	return renderTemplate(daemonSetTmplStr, data)
+}
+
+func (p *Plugin) daemonSetArgs(entrypoint string) []string {
+	return []string{"--entrypoint", entrypoint, "--role", roleDaemonSet}
 }
 
 func (p *Plugin) renderRBAC() (string, error) {
@@ -482,19 +487,14 @@ func (p *Plugin) renderMAP(entrypoint string) (string, error) {
 		containerName = "plugin-sidecar-" + p.name + "-" + entrypoint
 	}
 
-	var args string
-	if entrypoint != p.name {
-		args = fmt.Sprintf(`,
-            command: ["/plugin", "serve", "--entrypoint", %q]`, entrypoint)
-	}
-
 	jsonPatchExpr := fmt.Sprintf(`'[
     JSONPatch{
         op: "add",
         path: "/spec/containers/-",
         value: Object.spec.containers{
             name: %q,
-            image: %q%s,
+            image: %q,
+            args: %s,
             securityContext: Object.spec.containers.securityContext{
                 allowPrivilegeEscalation: false,
                 runAsNonRoot: true,
@@ -512,19 +512,31 @@ func (p *Plugin) renderMAP(entrypoint string) (string, error) {
             }]
         }
     }
-]'`, containerName, p.resolveImage(), args, PluginSocketsVolumeName, p.name, p.name)
+]'`, containerName, p.resolveImage(), celStringList(p.sidecarArgs(entrypoint)), PluginSocketsVolumeName, p.name, p.name)
 
 	data := struct {
 		Name                    string
 		PluginSocketsVolumeName string
-		JSONPatchExpression      string
+		JSONPatchExpression     string
 	}{
 		Name:                    name,
 		PluginSocketsVolumeName: PluginSocketsVolumeName,
-		JSONPatchExpression:      jsonPatchExpr,
+		JSONPatchExpression:     jsonPatchExpr,
 	}
 
 	return renderTemplate(mapTmplStr, data)
+}
+
+func (p *Plugin) sidecarArgs(entrypoint string) []string {
+	return []string{"--entrypoint", entrypoint, "--role", roleSidecar}
+}
+
+func celStringList(items []string) string {
+	quoted := make([]string, len(items))
+	for i, item := range items {
+		quoted[i] = strconv.Quote(item)
+	}
+	return "[" + strings.Join(quoted, ", ") + "]"
 }
 
 func (p *Plugin) renderMAPBinding(entrypoint string) (string, error) {
@@ -579,6 +591,21 @@ func (p *Plugin) sidecarDomainHooks() []DomainHookOption {
 		}
 	}
 	return result
+}
+
+// minBuilderGoVersion is the oldest Go release generated build files use,
+// matching the toolchain this SDK is built and tested with.
+const minBuilderGoVersion = "1.26"
+
+// builderGoVersion returns the golang image tag for building a plugin whose
+// go.mod declares goDirective: the latest patch release of its Go minor, but
+// no older than minBuilderGoVersion.
+func builderGoVersion(goDirective string) string {
+	lang := version.Lang("go" + goDirective)
+	if version.Compare(lang, "go"+minBuilderGoVersion) < 0 {
+		return minBuilderGoVersion
+	}
+	return strings.TrimPrefix(lang, "go")
 }
 
 func readGoVersion(dir string) (string, error) {
