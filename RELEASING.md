@@ -18,8 +18,9 @@ The SDK is versioned after KubeVirt: SDK `vX.Y.Z` targets KubeVirt `vX.Y` (see
 
 ## Support
 
-`main` and the latest SDK minor are maintained. `release-X.Y` reaches end of
-life when `vX.(Y+1).0` is tagged, and its periodic CI job is removed.
+`main` and the two latest SDK minors are maintained; fixes are backported to
+both release branches. `release-X.Y` reaches end of life when `vX.(Y+2).0` is
+tagged.
 
 ## KubeVirt version used by functional tests
 
@@ -35,8 +36,12 @@ life when `vX.(Y+1).0` is tagged, and its periodic CI job is removed.
 Defaults: on `release-X.Y`, an exact tag (the newest `vX.Y.0-rc.N` until
 KubeVirt `vX.Y.0` is out, then the newest `vX.Y.Z`). On `main`, the newest
 KubeVirt tag that carries the plugin API `main` implements, or `nightly` if
-there is none yet. Periodic CI runs `main` against `nightly`, and `release-X.Y`
-against `vX.Y` once `vX.Y.0` is out (before that, against the branch default).
+there is none yet. Periodic CI runs `main` against `nightly`;
+`periodic-kubevirt-plugins-e2e-latest-release` and
+`periodic-kubevirt-plugins-e2e-previous-release` run `hack/e2e-stable-release.sh`
+with `RELEASE_OFFSET` 0 and 1, picking the newest or previous `release-X.Y`
+branch and testing it against `vX.Y` (or the branch default until KubeVirt
+`vX.Y.0` is out), so new release branches need no CI change.
 
 ## New minor release (vX.Y.0)
 
