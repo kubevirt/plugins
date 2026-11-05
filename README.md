@@ -9,6 +9,7 @@ SDK and catalog for building [KubeVirt](https://kubevirt.io) plugins ([VEP 190](
 This repo provides:
 
 - **SDK** (`pkg/sdk/plugin`) - A Go framework for developing domain hooks and node hooks with minimal boilerplate.
+- **Artifact helpers** (`pkg/sdk/artifact`) - Atomic replacement of boot artifacts for PreBoot hooks.
 - **Catalog** (`plugins/`) - A collection of community plugins (coming soon).
 
 ## Compatibility
@@ -144,10 +145,47 @@ around domain hooks, silently dropping elements and attributes it does not model
 Supporting a new element needs upstream libvirtxml support and a KubeVirt release that vendors it.
 In KubeVirt v1.9 this applies to every VM once any Plugin exists, not only VMs a hook selects.
 
+## Authoring PreBoot Hooks
+
+KubeVirt v1.10 adds the sidecar-only `PreBoot` launcher hook. It runs after virt-launcher
+has generated the boot artifacts and before the guest starts, and receives their paths:
+`cloudInitISO` (the cloud-init ISO file) and `ephemeralDiskDir` (the ephemeral disk
+directory). The sidecar must mount the corresponding volumes at the same paths.
+
+A PreBoot hook changes files that virt-launcher and QEMU use as soon as it returns, and
+those changes are never rolled back:
+
+- **Prefer the `Fail` failure strategy.** With `Ignore`, the VM boots even if the hook
+  failed or timed out, and a timed-out hook keeps running while the launcher moves on.
+  Use `Ignore` only when the change is best effort and a missing or late change is safe.
+- **Honor the context.** Pass the request context to everything the hook does, so that
+  it stops when the hook deadline expires.
+- **Be idempotent.** The launcher may run PreBoot again after a failed start.
+- **Replace artifacts atomically** with `pkg/sdk/artifact` instead of editing them in place:
+
+```go
+iso := artifactPaths["cloudInitISO"]
+return artifact.ReplaceFile(ctx, iso, func(tmpPath string) error {
+    // Modify the copy at tmpPath, e.g. rebuild the ISO with new user data.
+    return patchISO(ctx, tmpPath)
+})
+```
+
+`ReplaceFile` and `ReplaceDir` copy the artifact to a temporary sibling, run the given
+function on the copy and swap it in atomically, so virt-launcher, QEMU and later hook
+invocations see either the complete old or the complete new version. They restore
+ownership and permissions and leave the original untouched on any error.
+Use `ReplaceFile` for the cloud-init ISO and `ReplaceDir` for subdirectories of
+`ephemeralDiskDir`. A sidecar that runs as the VM's non-root user (the default) needs
+no extra privileges; a root sidecar needs `CAP_CHOWN` and `CAP_FOWNER`. Entries the
+hook creates keep its user's ownership, so a root sidecar should chown new entries
+to the qemu user (107) when QEMU needs to reach them.
+
 ## Project Structure
 
 ```
 api/               Vendored proto/gRPC types from kubevirt
+pkg/sdk/artifact/  Atomic artifact replacement for PreBoot hooks
 pkg/sdk/plugin/    SDK framework
 pkg/sdk/testing/   Test fixtures and helpers
 plugins/           Plugin catalog (coming soon)
