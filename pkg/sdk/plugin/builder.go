@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"time"
 
+	pb "github.com/kubevirt/plugins/api/hooks/v1alpha1"
 	"github.com/kubevirt/plugins/pkg/sdk/cel"
 	rbacv1 "k8s.io/api/rbac/v1"
 )
@@ -22,6 +23,7 @@ type Plugin struct {
 
 type DomainHookOption struct {
 	handler         LibvirtDomainHookHandler
+	rawHandler      pb.DomainHookServiceServer
 	expression      string
 	condition       string
 	failureStrategy *FailureStrategy
@@ -51,11 +53,9 @@ func New(name string) *Plugin {
 }
 
 func (p *Plugin) WithDomainHook(opt *DomainHookOption) *Plugin {
-	if opt.handler == nil && opt.expression == "" {
-		panic("domain hook must have either a handler or a CEL expression")
-	}
-	if opt.handler != nil && opt.expression != "" {
-		panic("domain hook must have either a handler or a CEL expression, not both")
+	typed, raw, inline := opt.handler != nil, opt.rawHandler != nil, opt.isCEL()
+	if !(typed || raw || inline) || typed && raw || typed && inline || raw && inline {
+		panic("domain hook must have exactly one typed handler, raw handler or CEL expression")
 	}
 
 	p.domainHooks = append(p.domainHooks, *opt)
@@ -125,6 +125,14 @@ func (p *Plugin) WithImagePullPolicy(policy string) *Plugin {
 
 func ForLibvirt(handler LibvirtDomainHookHandler) *DomainHookOption {
 	return &DomainHookOption{handler: handler}
+}
+
+// ForRawDomain registers a domain handler without XML or VMI serialization.
+// The handler owns domain-type, input and scope validation. Use this when domain
+// extensions are not represented by libvirtxml or unrelated bytes must survive.
+// A raw handler cannot share an entrypoint with another sidecar domain hook.
+func ForRawDomain(handler pb.DomainHookServiceServer) *DomainHookOption {
+	return &DomainHookOption{rawHandler: handler}
 }
 
 func CELDomainHook(expression string) *DomainHookOption {

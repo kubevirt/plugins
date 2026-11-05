@@ -113,6 +113,58 @@ For node hook plugins, `generate` also produces `01-daemonset.yaml` (and `01-rba
 | Sidecar domain hook | gRPC sidecar mutating domain XML | Sidecar injected via MutatingAdmissionPolicy |
 | Node hook | gRPC DaemonSet invoked at VM lifecycle points | DaemonSet + Plugin CR |
 
+## Raw Domain Hooks
+
+`ForLibvirt` decodes domain XML into `libvirtxml.Domain` and serializes the whole
+domain after the handler returns. Use `ForRawDomain` when a hook needs to retain
+unknown domain extensions, comments or the original XML formatting. Raw handlers
+receive the existing gRPC request, including the original domain and VMI bytes,
+and return domain bytes without SDK XML or JSON serialization:
+
+```go
+package main
+
+import (
+	"context"
+
+	pb "github.com/kubevirt/plugins/api/hooks/v1alpha1"
+	"github.com/kubevirt/plugins/pkg/sdk/plugin"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+)
+
+type preserveDomainHandler struct{}
+
+func (*preserveDomainHandler) MutateDomain(
+	ctx context.Context,
+	req *pb.MutateDomainRequest,
+) (*pb.MutateDomainResponse, error) {
+	if req.GetDomainType() != "libvirt" {
+		return nil, status.Error(codes.InvalidArgument, "libvirt domain required")
+	}
+	// A no-op hook can return the original bytes exactly.
+	return &pb.MutateDomainResponse{Domain: req.GetDomain()}, nil
+}
+
+func main() {
+	plugin.New("preserve-domain").
+		WithDomainHook(plugin.ForRawDomain(&preserveDomainHandler{})).
+		Execute()
+}
+```
+
+A raw handler implements `DomainHookServiceServer`. It owns domain-type, input
+and VMI scope validation, and any selective mutation. The SDK preserves the RPC
+context (including cancellation), exposes invocation context through
+`InvocationContextFromContext`, and returns the handler's gRPC status unchanged.
+The existing protobuf contract and launcher RPC path are unchanged.
+
+Each entrypoint can serve one raw domain handler. It cannot share that
+entrypoint with another raw or typed sidecar domain handler because a typed
+handler would reintroduce serialization. Use separate entrypoints for raw and
+typed handlers. Existing typed handlers can still be chained, and CEL hooks
+continue to be evaluated by KubeVirt.
+
 ## Multi-Container Plugins
 
 Plugins that need separate containers for different concerns can use entrypoints to split
