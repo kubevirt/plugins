@@ -14,58 +14,88 @@ import (
 	"time"
 
 	pb "github.com/kubevirt/plugins/api/hooks/v1alpha1"
+	"github.com/kubevirt/plugins/pkg/sdk/migration"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/status"
 	v1 "kubevirt.io/api/core/v1"
 	"libvirt.org/go/libvirtxml"
 )
 
-type mutatingDomainHandler struct {
-	receivedVMI *v1.VirtualMachineInstance
+type mutatingGuestDefinitionHandler struct {
+	receivedVMI               *v1.VirtualMachineInstance
+	receivedInvocationContext InvocationContext
 }
 
-func (h *mutatingDomainHandler) MutateDomain(ctx context.Context, domain *libvirtxml.Domain, vmi *v1.VirtualMachineInstance) error {
-	h.receivedVMI = vmi
-	domain.Name = "mutated-" + domain.Name
+func (h *mutatingGuestDefinitionHandler) GuestDefinition(_ context.Context, req *GuestDefinitionRequest) error {
+	h.receivedVMI = req.VMI
+	h.receivedInvocationContext = req.InvocationContext
+	req.Domain.Name = "mutated-" + req.Domain.Name
 	return nil
 }
 
-type contextRecordingHandler struct {
-	receivedInvocationContext string
+type panickingGuestDefinitionHandler struct{}
+
+func (h *panickingGuestDefinitionHandler) GuestDefinition(_ context.Context, _ *GuestDefinitionRequest) error {
+	panic("handler exploded")
 }
 
-func (h *contextRecordingHandler) MutateDomain(ctx context.Context, domain *libvirtxml.Domain, _ *v1.VirtualMachineInstance) error {
-	h.receivedInvocationContext = InvocationContextFromContext(ctx)
-	return nil
-}
-
-type errorDomainHandler struct {
+type errorGuestDefinitionHandler struct {
 	err error
 }
 
-func (h *errorDomainHandler) MutateDomain(_ context.Context, _ *libvirtxml.Domain, _ *v1.VirtualMachineInstance) error {
+func (h *errorGuestDefinitionHandler) GuestDefinition(_ context.Context, _ *GuestDefinitionRequest) error {
 	return h.err
+}
+
+type recordingPreBootHandler struct {
+	receivedVMI           *v1.VirtualMachineInstance
+	receivedArtifactPaths map[string]string
+}
+
+func (h *recordingPreBootHandler) PreBoot(_ context.Context, req *PreBootRequest) (*PreBootResponse, error) {
+	h.receivedVMI = req.VMI
+	h.receivedArtifactPaths = req.ArtifactPaths
+	return nil, nil
+}
+
+type recordingPreMigrationSourceHandler struct {
+	receivedRequest *PreMigrationSourceRequest
+	response        *PreMigrationSourceResponse
+	err             error
+}
+
+func (h *recordingPreMigrationSourceHandler) PreMigrationSource(_ context.Context, req *PreMigrationSourceRequest) (*PreMigrationSourceResponse, error) {
+	h.receivedRequest = req
+	return h.response, h.err
 }
 
 type errorNodeHandler struct {
 	err error
 }
 
-func (h *errorNodeHandler) ExecuteNodeHook(_ context.Context, _ *NodeHookRequest) error {
-	return h.err
+func (h *errorNodeHandler) ExecuteNodeHook(_ context.Context, _ *NodeHookRequest) (*NodeHookResponse, error) {
+	return nil, h.err
 }
 
 type recordingNodeHandler struct {
-	receivedHookPoint string
+	receivedHookPoint NodeHookPoint
 	receivedNodeName  string
 	receivedVMI       *v1.VirtualMachineInstance
 }
 
-func (h *recordingNodeHandler) ExecuteNodeHook(_ context.Context, req *NodeHookRequest) error {
+func (h *recordingNodeHandler) ExecuteNodeHook(_ context.Context, req *NodeHookRequest) (*NodeHookResponse, error) {
 	h.receivedHookPoint = req.HookPoint
 	h.receivedNodeName = req.NodeName
 	h.receivedVMI = req.VMI
-	return nil
+	return nil, nil
+}
+
+type panickingNodeHandler struct{}
+
+func (h *panickingNodeHandler) ExecuteNodeHook(_ context.Context, _ *NodeHookRequest) (*NodeHookResponse, error) {
+	panic("node handler exploded")
 }
 
 func mustMarshalVMI(t *testing.T, vmi *v1.VirtualMachineInstance) []byte {
@@ -172,7 +202,7 @@ func unservableSocketPath(t *testing.T) string {
 	return filepath.Join(notADirectory, "x.sock")
 }
 
-func serveWithArgs(t *testing.T, plugin *Plugin, args []string, domainSock, nodeSock string, stopCh <-chan struct{}) <-chan error {
+func serveWithArgs(t *testing.T, plugin *Plugin, args []string, launcherSock, nodeSock string, stopCh <-chan struct{}) <-chan error {
 	t.Helper()
 
 	serveOpts, err := parseServeArgs(args)
@@ -182,7 +212,7 @@ func serveWithArgs(t *testing.T, plugin *Plugin, args []string, domainSock, node
 
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- plugin.Serve(append(serveOpts, withDomainSocketPath(domainSock), withNodeSocketPath(nodeSock), withStopCh(stopCh))...)
+		errCh <- plugin.Serve(append(serveOpts, withLauncherSocketPath(launcherSock), withNodeSocketPath(nodeSock), withStopCh(stopCh))...)
 	}()
 
 	return errCh
@@ -190,19 +220,19 @@ func serveWithArgs(t *testing.T, plugin *Plugin, args []string, domainSock, node
 
 // --- Adapter unit tests ---
 
-func TestDomainHookAdapterMutatesDomain(t *testing.T) {
-	handler := &mutatingDomainHandler{}
-	adapter := &domainHookAdapter{handler: handler}
+func TestLauncherHookAdapterMutatesDomain(t *testing.T) {
+	handler := &mutatingGuestDefinitionHandler{}
+	adapter := &launcherHookAdapter{guestDefinitionHandler: handler}
 
 	vmi := testVMI("test-vmi")
-	resp, err := adapter.MutateDomain(context.Background(), &pb.MutateDomainRequest{
+	resp, err := adapter.GuestDefinition(context.Background(), &pb.GuestDefinitionRequest{
 		DomainType:     "libvirt",
 		Domain:         testDomainXML(t, "original"),
 		Vmi:            mustMarshalVMI(t, vmi),
 		SidecarContext: &pb.SidecarContext{},
 	})
 	if err != nil {
-		t.Fatalf("MutateDomain failed: %v", err)
+		t.Fatalf("GuestDefinition failed: %v", err)
 	}
 
 	var result libvirtxml.Domain
@@ -219,18 +249,18 @@ func TestDomainHookAdapterMutatesDomain(t *testing.T) {
 	}
 }
 
-func TestDomainHookAdapterPassthroughUnknownDomainType(t *testing.T) {
-	handler := &mutatingDomainHandler{}
-	adapter := &domainHookAdapter{handler: handler}
+func TestLauncherHookAdapterPassthroughUnknownDomainType(t *testing.T) {
+	handler := &mutatingGuestDefinitionHandler{}
+	adapter := &launcherHookAdapter{guestDefinitionHandler: handler}
 
 	originalDomain := []byte("<some-unknown-format/>")
-	resp, err := adapter.MutateDomain(context.Background(), &pb.MutateDomainRequest{
+	resp, err := adapter.GuestDefinition(context.Background(), &pb.GuestDefinitionRequest{
 		DomainType: "mshv",
 		Domain:     originalDomain,
 		Vmi:        mustMarshalVMI(t, testVMI("test")),
 	})
 	if err != nil {
-		t.Fatalf("MutateDomain failed: %v", err)
+		t.Fatalf("GuestDefinition failed: %v", err)
 	}
 
 	if string(resp.Domain) != string(originalDomain) {
@@ -238,36 +268,36 @@ func TestDomainHookAdapterPassthroughUnknownDomainType(t *testing.T) {
 	}
 }
 
-func TestDomainHookAdapterPassesInvocationContext(t *testing.T) {
-	handler := &contextRecordingHandler{}
-	adapter := &domainHookAdapter{handler: handler}
+func TestLauncherHookAdapterPassesInvocationContext(t *testing.T) {
+	handler := &mutatingGuestDefinitionHandler{}
+	adapter := &launcherHookAdapter{guestDefinitionHandler: handler}
 
-	_, err := adapter.MutateDomain(context.Background(), &pb.MutateDomainRequest{
+	_, err := adapter.GuestDefinition(context.Background(), &pb.GuestDefinitionRequest{
 		DomainType:     "libvirt",
 		Domain:         testDomainXML(t, "test"),
 		Vmi:            mustMarshalVMI(t, testVMI("test")),
-		SidecarContext: &pb.SidecarContext{InvocationContext: "my-invocation-context"},
+		SidecarContext: &pb.SidecarContext{InvocationContext: string(InvocationContextMigrationTarget)},
 	})
 	if err != nil {
-		t.Fatalf("MutateDomain failed: %v", err)
+		t.Fatalf("GuestDefinition failed: %v", err)
 	}
 
-	if handler.receivedInvocationContext != "my-invocation-context" {
-		t.Fatalf("expected invocation context %q, got %q", "my-invocation-context", handler.receivedInvocationContext)
+	if handler.receivedInvocationContext != InvocationContextMigrationTarget {
+		t.Fatalf("expected invocation context %q, got %q", InvocationContextMigrationTarget, handler.receivedInvocationContext)
 	}
 }
 
-func TestDomainHookAdapterNilSidecarContext(t *testing.T) {
-	handler := &contextRecordingHandler{}
-	adapter := &domainHookAdapter{handler: handler}
+func TestLauncherHookAdapterNilSidecarContext(t *testing.T) {
+	handler := &mutatingGuestDefinitionHandler{}
+	adapter := &launcherHookAdapter{guestDefinitionHandler: handler}
 
-	_, err := adapter.MutateDomain(context.Background(), &pb.MutateDomainRequest{
+	_, err := adapter.GuestDefinition(context.Background(), &pb.GuestDefinitionRequest{
 		DomainType: "libvirt",
 		Domain:     testDomainXML(t, "test"),
 		Vmi:        mustMarshalVMI(t, testVMI("test")),
 	})
 	if err != nil {
-		t.Fatalf("MutateDomain failed: %v", err)
+		t.Fatalf("GuestDefinition failed: %v", err)
 	}
 
 	if handler.receivedInvocationContext != "" {
@@ -275,13 +305,288 @@ func TestDomainHookAdapterNilSidecarContext(t *testing.T) {
 	}
 }
 
+func TestLauncherHookAdapterUnimplementedHookPoints(t *testing.T) {
+	adapter := &launcherHookAdapter{guestDefinitionHandler: &stubGuestDefinitionHandler{}}
+
+	_, err := adapter.PreBoot(context.Background(), &pb.PreBootRequest{})
+	if status.Code(err) != codes.Unimplemented {
+		t.Fatalf("expected Unimplemented from PreBoot, got %v", err)
+	}
+
+	_, err = adapter.PreMigrationSource(context.Background(), &pb.PreMigrationSourceRequest{})
+	if status.Code(err) != codes.Unimplemented {
+		t.Fatalf("expected Unimplemented from PreMigrationSource, got %v", err)
+	}
+
+	emptyAdapter := &launcherHookAdapter{}
+	_, err = emptyAdapter.GuestDefinition(context.Background(), &pb.GuestDefinitionRequest{})
+	if status.Code(err) != codes.Unimplemented {
+		t.Fatalf("expected Unimplemented from GuestDefinition, got %v", err)
+	}
+}
+
+func TestLauncherHookAdapterPreBootPassesArtifactPaths(t *testing.T) {
+	handler := &recordingPreBootHandler{}
+	adapter := &launcherHookAdapter{preBootHandler: handler}
+
+	artifactPaths := map[string]string{
+		pb.PreBootArtifactCloudInitISO:     "/var/run/kubevirt-ephemeral-disks/cloud-init-data/default/vmi/noCloud.iso",
+		pb.PreBootArtifactEphemeralDiskDir: "/var/run/kubevirt-ephemeral-disks",
+	}
+	_, err := adapter.PreBoot(context.Background(), &pb.PreBootRequest{
+		Vmi:            mustMarshalVMI(t, testVMI("preboot-vmi")),
+		PreBootContext: &pb.PreBootContext{ArtifactPaths: artifactPaths},
+	})
+	if err != nil {
+		t.Fatalf("PreBoot failed: %v", err)
+	}
+
+	if handler.receivedVMI == nil || handler.receivedVMI.Name != "preboot-vmi" {
+		t.Fatal("handler did not receive the correct VMI")
+	}
+
+	if handler.receivedArtifactPaths == nil {
+		t.Fatal("handler received a nil artifact path map")
+	}
+
+	isoPath, ok := handler.receivedArtifactPaths[pb.PreBootArtifactCloudInitISO]
+	if !ok || isoPath != artifactPaths[pb.PreBootArtifactCloudInitISO] {
+		t.Fatalf("expected cloud-init ISO path to be passed, got %q (%v)", isoPath, ok)
+	}
+}
+
+func TestLauncherHookAdapterPreBootNilContext(t *testing.T) {
+	handler := &recordingPreBootHandler{}
+	adapter := &launcherHookAdapter{preBootHandler: handler}
+
+	_, err := adapter.PreBoot(context.Background(), &pb.PreBootRequest{Vmi: mustMarshalVMI(t, testVMI("test"))})
+	if err != nil {
+		t.Fatalf("PreBoot failed: %v", err)
+	}
+
+	if handler.receivedArtifactPaths == nil || len(handler.receivedArtifactPaths) != 0 {
+		t.Fatalf("expected a non-nil empty artifact path map, got %v", handler.receivedArtifactPaths)
+	}
+}
+
+func TestLauncherHookAdapterPreMigrationSourceRequestConversion(t *testing.T) {
+	handler := &recordingPreMigrationSourceHandler{}
+	adapter := &launcherHookAdapter{preMigrationSourceHandler: handler}
+
+	requestFlags := migration.Live | migration.PeerToPeer
+	_, err := adapter.PreMigrationSource(context.Background(), &pb.PreMigrationSourceRequest{
+		Vmi: mustMarshalVMI(t, testVMI("migration-vmi")),
+		MigrationConfig: &pb.PreMigrationSourceRequest_Libvirt{Libvirt: &pb.LibvirtMigrationConfig{
+			Flags:  uint64(requestFlags),
+			Params: &pb.LibvirtDomainMigrateParameters{Uri: migration.String("unix://migration.sock"), Bandwidth: migration.Uint64(128)},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("PreMigrationSource failed: %v", err)
+	}
+
+	req := handler.receivedRequest
+	if req.VMI == nil || req.VMI.Name != "migration-vmi" {
+		t.Fatal("handler did not receive the correct VMI")
+	}
+
+	if !req.Libvirt.Flags.Has(migration.Live) || !req.Libvirt.Flags.Has(migration.PeerToPeer) || req.Libvirt.Flags.Has(migration.Tunnelled) {
+		t.Fatalf("expected flags %b, got %b", requestFlags, req.Libvirt.Flags)
+	}
+
+	uri, ok := migration.StringValue(req.Libvirt.Params.Uri)
+	if !ok || uri != "unix://migration.sock" {
+		t.Fatalf("expected uri parameter to be present, got %q (%v)", uri, ok)
+	}
+
+	bandwidth, ok := migration.Uint64Value(req.Libvirt.Params.Bandwidth)
+	if !ok || bandwidth != 128 {
+		t.Fatalf("expected bandwidth parameter to be present, got %d (%v)", bandwidth, ok)
+	}
+
+	if _, ok := migration.StringValue(req.Libvirt.Params.DestName); ok {
+		t.Fatal("expected absent dest_name parameter")
+	}
+}
+
+func TestLauncherHookAdapterPreMigrationSourceNilParams(t *testing.T) {
+	handler := &recordingPreMigrationSourceHandler{}
+	adapter := &launcherHookAdapter{preMigrationSourceHandler: handler}
+
+	_, err := adapter.PreMigrationSource(context.Background(), &pb.PreMigrationSourceRequest{
+		Vmi:             mustMarshalVMI(t, testVMI("test")),
+		MigrationConfig: &pb.PreMigrationSourceRequest_Libvirt{Libvirt: &pb.LibvirtMigrationConfig{Flags: uint64(migration.Live)}},
+	})
+	if err != nil {
+		t.Fatalf("PreMigrationSource failed: %v", err)
+	}
+
+	req := handler.receivedRequest
+	if req.Libvirt.Params == nil {
+		t.Fatal("expected nil params to be replaced by an empty message")
+	}
+
+	if _, ok := migration.StringValue(req.Libvirt.Params.Uri); ok {
+		t.Fatal("expected no uri parameter in the empty message")
+	}
+}
+
+func TestLauncherHookAdapterPreMigrationSourceNilMigrationConfig(t *testing.T) {
+	handler := &recordingPreMigrationSourceHandler{}
+	adapter := &launcherHookAdapter{preMigrationSourceHandler: handler}
+
+	_, err := adapter.PreMigrationSource(context.Background(), &pb.PreMigrationSourceRequest{
+		Vmi: mustMarshalVMI(t, testVMI("test")),
+	})
+	if err != nil {
+		t.Fatalf("PreMigrationSource failed: %v", err)
+	}
+
+	if handler.receivedRequest.Libvirt != nil {
+		t.Fatalf("expected a nil Libvirt config to reach the handler, got %+v", handler.receivedRequest.Libvirt)
+	}
+}
+
+func TestLauncherHookAdapterPreMigrationSourceResponseConversion(t *testing.T) {
+	handler := &recordingPreMigrationSourceHandler{
+		response: &PreMigrationSourceResponse{Libvirt: &LibvirtMigrationChanges{
+			SetFlags:   migration.Parallel,
+			ClearFlags: migration.Compressed,
+			Params:     &LibvirtDomainMigrateParameters{Uri: migration.String("unix://overridden.sock"), MigrateDisks: migration.Strings("vda", "vdb")},
+		}},
+	}
+	adapter := &launcherHookAdapter{preMigrationSourceHandler: handler}
+
+	resp, err := adapter.PreMigrationSource(context.Background(), &pb.PreMigrationSourceRequest{
+		Vmi:             mustMarshalVMI(t, testVMI("test")),
+		MigrationConfig: &pb.PreMigrationSourceRequest_Libvirt{Libvirt: &pb.LibvirtMigrationConfig{}},
+	})
+	if err != nil {
+		t.Fatalf("PreMigrationSource failed: %v", err)
+	}
+
+	changes := resp.GetLibvirt()
+	if changes == nil {
+		t.Fatal("expected the libvirt response variant")
+	}
+
+	if changes.GetSetFlags() != uint64(migration.Parallel) || changes.GetClearFlags() != uint64(migration.Compressed) {
+		t.Fatalf("expected set/clear flags, got %d/%d", changes.GetSetFlags(), changes.GetClearFlags())
+	}
+
+	uri, ok := migration.StringValue(changes.GetParams().GetUri())
+	if !ok || uri != "unix://overridden.sock" {
+		t.Fatalf("expected uri override on the wire, got %q (%v)", uri, ok)
+	}
+
+	disks, ok := migration.StringsValue(changes.GetParams().GetMigrateDisks())
+	if !ok || len(disks) != 2 || disks[0] != "vda" || disks[1] != "vdb" {
+		t.Fatalf("expected migrate_disks override on the wire, got %v (%v)", disks, ok)
+	}
+}
+
+func TestLauncherHookAdapterPreMigrationSourceRemoveParams(t *testing.T) {
+	handler := &recordingPreMigrationSourceHandler{
+		response: &PreMigrationSourceResponse{Libvirt: &LibvirtMigrationChanges{
+			Params: &LibvirtDomainMigrateParameters{Uri: migration.RemoveString(), MigrateDisks: migration.RemoveStrings()},
+		}},
+	}
+	adapter := &launcherHookAdapter{preMigrationSourceHandler: handler}
+
+	resp, err := adapter.PreMigrationSource(context.Background(), &pb.PreMigrationSourceRequest{
+		Vmi:             mustMarshalVMI(t, testVMI("test")),
+		MigrationConfig: &pb.PreMigrationSourceRequest_Libvirt{Libvirt: &pb.LibvirtMigrationConfig{}},
+	})
+	if err != nil {
+		t.Fatalf("PreMigrationSource failed: %v", err)
+	}
+
+	changes := resp.GetLibvirt()
+	if changes == nil {
+		t.Fatal("expected the libvirt response variant")
+	}
+
+	if changes.GetParams().GetUri() == nil || changes.GetParams().GetUri().GetKind() != nil {
+		t.Fatal("expected an empty wrapper on the wire for a removed string parameter")
+	}
+
+	if changes.GetParams().GetMigrateDisks() == nil || len(changes.GetParams().GetMigrateDisks().GetValues()) != 0 {
+		t.Fatal("expected an empty list on the wire for a removed string list parameter")
+	}
+}
+
+func TestLauncherHookAdapterPreMigrationSourceNilResponse(t *testing.T) {
+	handler := &recordingPreMigrationSourceHandler{}
+	adapter := &launcherHookAdapter{preMigrationSourceHandler: handler}
+
+	resp, err := adapter.PreMigrationSource(context.Background(), &pb.PreMigrationSourceRequest{
+		Vmi:             mustMarshalVMI(t, testVMI("test")),
+		MigrationConfig: &pb.PreMigrationSourceRequest_Libvirt{Libvirt: &pb.LibvirtMigrationConfig{}},
+	})
+	if err != nil {
+		t.Fatalf("PreMigrationSource failed: %v", err)
+	}
+
+	if resp.GetLibvirt() != nil {
+		t.Fatalf("expected an empty response, got %+v", resp)
+	}
+
+	handler.response = &PreMigrationSourceResponse{}
+	resp, err = adapter.PreMigrationSource(context.Background(), &pb.PreMigrationSourceRequest{
+		Vmi:             mustMarshalVMI(t, testVMI("test")),
+		MigrationConfig: &pb.PreMigrationSourceRequest_Libvirt{Libvirt: &pb.LibvirtMigrationConfig{}},
+	})
+	if err != nil {
+		t.Fatalf("PreMigrationSource failed: %v", err)
+	}
+
+	if resp.GetLibvirt() != nil {
+		t.Fatalf("expected an empty response for a nil Libvirt, got %+v", resp)
+	}
+}
+
+func TestLauncherHookAdapterPreMigrationSourceOverlappingFlagsError(t *testing.T) {
+	handler := &recordingPreMigrationSourceHandler{
+		response: &PreMigrationSourceResponse{Libvirt: &LibvirtMigrationChanges{
+			SetFlags:   migration.Live | migration.Unsafe,
+			ClearFlags: migration.Live | migration.PeerToPeer,
+		}},
+	}
+	adapter := &launcherHookAdapter{preMigrationSourceHandler: handler}
+
+	_, err := adapter.PreMigrationSource(context.Background(), &pb.PreMigrationSourceRequest{
+		Vmi:             mustMarshalVMI(t, testVMI("test")),
+		MigrationConfig: &pb.PreMigrationSourceRequest_Libvirt{Libvirt: &pb.LibvirtMigrationConfig{}},
+	})
+	if err == nil {
+		t.Fatal("expected an error for overlapping set and clear flags")
+	}
+
+	if !strings.Contains(err.Error(), "both set and cleared") || !strings.Contains(err.Error(), "0b1") {
+		t.Fatalf("expected the error to name the overlapping bits, got: %v", err)
+	}
+}
+
+func TestLauncherHookAdapterPreMigrationSourceHandlerError(t *testing.T) {
+	handler := &recordingPreMigrationSourceHandler{err: fmt.Errorf("handler broke")}
+	adapter := &launcherHookAdapter{preMigrationSourceHandler: handler}
+
+	_, err := adapter.PreMigrationSource(context.Background(), &pb.PreMigrationSourceRequest{
+		Vmi:             mustMarshalVMI(t, testVMI("test")),
+		MigrationConfig: &pb.PreMigrationSourceRequest_Libvirt{Libvirt: &pb.LibvirtMigrationConfig{}},
+	})
+	if err == nil || !strings.Contains(err.Error(), "handler broke") {
+		t.Fatalf("expected handler error to be propagated, got: %v", err)
+	}
+}
+
 func TestNodeHookAdapterCallsHandler(t *testing.T) {
 	handler := &recordingNodeHandler{}
-	adapter := &nodeHookAdapter{handlers: map[string]NodeHookHandler{PreVMStart: handler}}
+	adapter := &nodeHookAdapter{handlers: map[NodeHookPoint]NodeHookHandler{NodeHookPreVMStart: handler}}
 
 	vmi := testVMI("node-vmi")
 	_, err := adapter.ExecuteNodeHook(context.Background(), &pb.ExecuteNodeHookRequest{
-		HookPoint:   PreVMStart,
+		HookPoint:   string(NodeHookPreVMStart),
 		Vmi:         mustMarshalVMI(t, vmi),
 		NodeContext: &pb.NodeContext{NodeName: "worker-1"},
 	})
@@ -289,8 +594,8 @@ func TestNodeHookAdapterCallsHandler(t *testing.T) {
 		t.Fatalf("ExecuteNodeHook failed: %v", err)
 	}
 
-	if handler.receivedHookPoint != PreVMStart {
-		t.Fatalf("expected hook point %q, got %q", PreVMStart, handler.receivedHookPoint)
+	if handler.receivedHookPoint != NodeHookPreVMStart {
+		t.Fatalf("expected hook point %q, got %q", NodeHookPreVMStart, handler.receivedHookPoint)
 	}
 
 	if handler.receivedNodeName != "worker-1" {
@@ -304,10 +609,10 @@ func TestNodeHookAdapterCallsHandler(t *testing.T) {
 
 func TestNodeHookAdapterNilNodeContext(t *testing.T) {
 	handler := &recordingNodeHandler{}
-	adapter := &nodeHookAdapter{handlers: map[string]NodeHookHandler{PreVMStart: handler}}
+	adapter := &nodeHookAdapter{handlers: map[NodeHookPoint]NodeHookHandler{NodeHookPreVMStart: handler}}
 
 	_, err := adapter.ExecuteNodeHook(context.Background(), &pb.ExecuteNodeHookRequest{
-		HookPoint: PreVMStart,
+		HookPoint: string(NodeHookPreVMStart),
 		Vmi:       mustMarshalVMI(t, testVMI("test")),
 	})
 	if err != nil {
@@ -323,49 +628,49 @@ func TestNodeHookAdapterNilNodeContext(t *testing.T) {
 
 func TestServeStartsAndStopsGracefully(t *testing.T) {
 	tmpDir := t.TempDir()
-	domainSock := filepath.Join(tmpDir, "domain.sock")
+	launcherSock := filepath.Join(tmpDir, "launcher.sock")
 
-	handler := &mutatingDomainHandler{}
-	p := New("test-plugin").WithDomainHook(ForLibvirt(handler))
+	handler := &mutatingGuestDefinitionHandler{}
+	p := New("test-plugin").WithLauncherHook(GuestDefinition(handler))
 
 	stopCh := make(chan struct{})
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- p.Serve(withDomainSocketPath(domainSock), withStopCh(stopCh))
+		errCh <- p.Serve(withLauncherSocketPath(launcherSock), withStopCh(stopCh))
 	}()
 
-	waitForSocket(t, domainSock)
+	waitForSocket(t, launcherSock)
 
 	close(stopCh)
 	awaitServeStop(t, errCh)
 }
 
-func TestServeRegistersDomainHookAdapter(t *testing.T) {
+func TestServeRegistersLauncherHookAdapter(t *testing.T) {
 	tmpDir := t.TempDir()
-	domainSock := filepath.Join(tmpDir, "domain.sock")
+	launcherSock := filepath.Join(tmpDir, "launcher.sock")
 
-	handler := &mutatingDomainHandler{}
-	p := New("test-plugin").WithDomainHook(ForLibvirt(handler))
+	handler := &mutatingGuestDefinitionHandler{}
+	p := New("test-plugin").WithLauncherHook(GuestDefinition(handler))
 
 	stopCh := make(chan struct{})
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- p.Serve(withDomainSocketPath(domainSock), withStopCh(stopCh))
+		errCh <- p.Serve(withLauncherSocketPath(launcherSock), withStopCh(stopCh))
 	}()
 
-	waitForSocket(t, domainSock)
+	waitForSocket(t, launcherSock)
 
-	conn := dialSocket(t, domainSock)
-	client := pb.NewDomainHookServiceClient(conn)
+	conn := dialSocket(t, launcherSock)
+	client := pb.NewLauncherHookServiceClient(conn)
 
-	resp, err := client.MutateDomain(context.Background(), &pb.MutateDomainRequest{
+	resp, err := client.GuestDefinition(context.Background(), &pb.GuestDefinitionRequest{
 		DomainType:     "libvirt",
 		Domain:         testDomainXML(t, "original"),
 		Vmi:            mustMarshalVMI(t, testVMI("grpc-test-vmi")),
 		SidecarContext: &pb.SidecarContext{},
 	})
 	if err != nil {
-		t.Fatalf("MutateDomain RPC failed: %v", err)
+		t.Fatalf("GuestDefinition RPC failed: %v", err)
 	}
 
 	var result libvirtxml.Domain
@@ -381,12 +686,107 @@ func TestServeRegistersDomainHookAdapter(t *testing.T) {
 	awaitServeStop(t, errCh)
 }
 
-func TestServeRegistersNodeHookAdapter(t *testing.T) {
+func TestServeServesAllLauncherHookPointsOfAnEntrypoint(t *testing.T) {
+	tmpDir := t.TempDir()
+	launcherSock := filepath.Join(tmpDir, "launcher.sock")
+
+	guestDefinitionHandler := &mutatingGuestDefinitionHandler{}
+	preBootHandler := &recordingPreBootHandler{}
+	preMigrationSourceHandler := &recordingPreMigrationSourceHandler{}
+	p := New("test-plugin").
+		WithLauncherHook(GuestDefinition(guestDefinitionHandler)).
+		WithLauncherHook(PreBoot(preBootHandler)).
+		WithLauncherHook(PreMigrationSource(preMigrationSourceHandler))
+
+	stopCh := make(chan struct{})
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- p.Serve(withLauncherSocketPath(launcherSock), withStopCh(stopCh))
+	}()
+
+	waitForSocket(t, launcherSock)
+
+	conn := dialSocket(t, launcherSock)
+	client := pb.NewLauncherHookServiceClient(conn)
+
+	if _, err := client.GuestDefinition(context.Background(), &pb.GuestDefinitionRequest{DomainType: "libvirt", Domain: testDomainXML(t, "original"), Vmi: mustMarshalVMI(t, testVMI("test")), SidecarContext: &pb.SidecarContext{}}); err != nil {
+		t.Fatalf("GuestDefinition RPC failed: %v", err)
+	}
+
+	if _, err := client.PreBoot(context.Background(), &pb.PreBootRequest{Vmi: mustMarshalVMI(t, testVMI("test")), PreBootContext: &pb.PreBootContext{ArtifactPaths: map[string]string{pb.PreBootArtifactEphemeralDiskDir: "/var/run/kubevirt-ephemeral-disks"}}}); err != nil {
+		t.Fatalf("PreBoot RPC failed: %v", err)
+	}
+
+	if _, err := client.PreMigrationSource(context.Background(), &pb.PreMigrationSourceRequest{Vmi: mustMarshalVMI(t, testVMI("test")), MigrationConfig: &pb.PreMigrationSourceRequest_Libvirt{Libvirt: &pb.LibvirtMigrationConfig{}}}); err != nil {
+		t.Fatalf("PreMigrationSource RPC failed: %v", err)
+	}
+
+	if guestDefinitionHandler.receivedVMI == nil {
+		t.Fatal("expected the GuestDefinition handler to be called")
+	}
+
+	if preBootHandler.receivedVMI == nil {
+		t.Fatal("expected the PreBoot handler to be called")
+	}
+
+	if preMigrationSourceHandler.receivedRequest == nil {
+		t.Fatal("expected the PreMigrationSource handler to be called")
+	}
+
+	close(stopCh)
+	awaitServeStop(t, errCh)
+}
+
+func TestServePanicReturnsInternal(t *testing.T) {
+	tmpDir := t.TempDir()
+	launcherSock := filepath.Join(tmpDir, "launcher.sock")
+
+	p := New("test-plugin").WithLauncherHook(GuestDefinition(&panickingGuestDefinitionHandler{}))
+
+	stopCh := make(chan struct{})
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- p.Serve(withLauncherSocketPath(launcherSock), withStopCh(stopCh))
+	}()
+
+	waitForSocket(t, launcherSock)
+
+	conn := dialSocket(t, launcherSock)
+	client := pb.NewLauncherHookServiceClient(conn)
+
+	_, err := client.GuestDefinition(context.Background(), &pb.GuestDefinitionRequest{
+		DomainType:     "libvirt",
+		Domain:         testDomainXML(t, "original"),
+		Vmi:            mustMarshalVMI(t, testVMI("test")),
+		SidecarContext: &pb.SidecarContext{},
+	})
+	if status.Code(err) != codes.Internal {
+		t.Fatalf("expected Internal from a panicking handler, got %v", err)
+	}
+
+	// The server must survive the panic and keep serving.
+	resp, err := client.GuestDefinition(context.Background(), &pb.GuestDefinitionRequest{
+		DomainType: "mshv",
+		Domain:     []byte("<passthrough/>"),
+		Vmi:        mustMarshalVMI(t, testVMI("test")),
+	})
+	if err != nil {
+		t.Fatalf("GuestDefinition RPC after panic failed: %v", err)
+	}
+
+	if string(resp.Domain) != "<passthrough/>" {
+		t.Fatalf("expected passthrough after panic, got %q", string(resp.Domain))
+	}
+
+	close(stopCh)
+	awaitServeStop(t, errCh)
+}
+
+func TestServeNodeHookPanicReturnsInternal(t *testing.T) {
 	tmpDir := t.TempDir()
 	nodeSock := filepath.Join(tmpDir, "node.sock")
 
-	handler := &recordingNodeHandler{}
-	p := New("test-plugin").WithNodeHook(PreVMStart, NodeHandler(handler))
+	p := New("test-plugin").WithNodeHook(NodeHookPreVMStart, NodeHandler(&panickingNodeHandler{}))
 
 	stopCh := make(chan struct{})
 	errCh := make(chan error, 1)
@@ -400,7 +800,48 @@ func TestServeRegistersNodeHookAdapter(t *testing.T) {
 	client := pb.NewNodeHookServiceClient(conn)
 
 	_, err := client.ExecuteNodeHook(context.Background(), &pb.ExecuteNodeHookRequest{
-		HookPoint:   PreVMStart,
+		HookPoint:   string(NodeHookPreVMStart),
+		Vmi:         mustMarshalVMI(t, testVMI("test")),
+		NodeContext: &pb.NodeContext{NodeName: "node-1"},
+	})
+	if status.Code(err) != codes.Internal {
+		t.Fatalf("expected Internal from a panicking node handler, got %v", err)
+	}
+
+	// The server must survive the panic and keep serving.
+	_, err = client.ExecuteNodeHook(context.Background(), &pb.ExecuteNodeHookRequest{
+		HookPoint:   string(NodeHookPreVMStart),
+		Vmi:         mustMarshalVMI(t, testVMI("test")),
+		NodeContext: &pb.NodeContext{NodeName: "node-1"},
+	})
+	if status.Code(err) != codes.Internal {
+		t.Fatalf("expected the server to survive the panic, got %v", err)
+	}
+
+	close(stopCh)
+	awaitServeStop(t, errCh)
+}
+
+func TestServeRegistersNodeHookAdapter(t *testing.T) {
+	tmpDir := t.TempDir()
+	nodeSock := filepath.Join(tmpDir, "node.sock")
+
+	handler := &recordingNodeHandler{}
+	p := New("test-plugin").WithNodeHook(NodeHookPreVMStart, NodeHandler(handler))
+
+	stopCh := make(chan struct{})
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- p.Serve(withNodeSocketPath(nodeSock), withStopCh(stopCh))
+	}()
+
+	waitForSocket(t, nodeSock)
+
+	conn := dialSocket(t, nodeSock)
+	client := pb.NewNodeHookServiceClient(conn)
+
+	_, err := client.ExecuteNodeHook(context.Background(), &pb.ExecuteNodeHookRequest{
+		HookPoint:   string(NodeHookPreVMStart),
 		Vmi:         mustMarshalVMI(t, testVMI("node-test-vmi")),
 		NodeContext: &pb.NodeContext{NodeName: "test-node"},
 	})
@@ -408,8 +849,8 @@ func TestServeRegistersNodeHookAdapter(t *testing.T) {
 		t.Fatalf("ExecuteNodeHook RPC failed: %v", err)
 	}
 
-	if handler.receivedHookPoint != PreVMStart {
-		t.Fatalf("expected hook point %q, got %q", PreVMStart, handler.receivedHookPoint)
+	if handler.receivedHookPoint != NodeHookPreVMStart {
+		t.Fatalf("expected hook point %q, got %q", NodeHookPreVMStart, handler.receivedHookPoint)
 	}
 
 	if handler.receivedNodeName != "test-node" {
@@ -422,10 +863,10 @@ func TestServeRegistersNodeHookAdapter(t *testing.T) {
 
 // --- Adapter error-path tests ---
 
-func TestDomainHookAdapterInvalidXML(t *testing.T) {
-	adapter := &domainHookAdapter{handler: &mutatingDomainHandler{}}
+func TestLauncherHookAdapterInvalidXML(t *testing.T) {
+	adapter := &launcherHookAdapter{guestDefinitionHandler: &mutatingGuestDefinitionHandler{}}
 
-	_, err := adapter.MutateDomain(context.Background(), &pb.MutateDomainRequest{
+	_, err := adapter.GuestDefinition(context.Background(), &pb.GuestDefinitionRequest{
 		DomainType:     "libvirt",
 		Domain:         []byte("not-valid-xml{{{"),
 		Vmi:            mustMarshalVMI(t, testVMI("test")),
@@ -440,10 +881,10 @@ func TestDomainHookAdapterInvalidXML(t *testing.T) {
 	}
 }
 
-func TestDomainHookAdapterInvalidVMIJSON(t *testing.T) {
-	adapter := &domainHookAdapter{handler: &mutatingDomainHandler{}}
+func TestLauncherHookAdapterInvalidVMIJSON(t *testing.T) {
+	adapter := &launcherHookAdapter{guestDefinitionHandler: &mutatingGuestDefinitionHandler{}}
 
-	_, err := adapter.MutateDomain(context.Background(), &pb.MutateDomainRequest{
+	_, err := adapter.GuestDefinition(context.Background(), &pb.GuestDefinitionRequest{
 		DomainType:     "libvirt",
 		Domain:         testDomainXML(t, "test"),
 		Vmi:            []byte("not-valid-json{{{"),
@@ -458,11 +899,39 @@ func TestDomainHookAdapterInvalidVMIJSON(t *testing.T) {
 	}
 }
 
-func TestDomainHookAdapterHandlerError(t *testing.T) {
-	handlerErr := fmt.Errorf("handler broke")
-	adapter := &domainHookAdapter{handler: &errorDomainHandler{err: handlerErr}}
+func TestLauncherHookAdapterPreBootInvalidVMIJSON(t *testing.T) {
+	handler := &recordingPreBootHandler{}
+	adapter := &launcherHookAdapter{preBootHandler: handler}
 
-	_, err := adapter.MutateDomain(context.Background(), &pb.MutateDomainRequest{
+	_, err := adapter.PreBoot(context.Background(), &pb.PreBootRequest{Vmi: []byte("not-valid-json{{{")})
+	if err == nil {
+		t.Fatal("expected error for invalid VMI JSON")
+	}
+
+	if !strings.Contains(err.Error(), "unmarshal VMI") {
+		t.Fatalf("expected VMI unmarshal error, got: %v", err)
+	}
+}
+
+func TestLauncherHookAdapterPreMigrationSourceInvalidVMIJSON(t *testing.T) {
+	handler := &recordingPreMigrationSourceHandler{}
+	adapter := &launcherHookAdapter{preMigrationSourceHandler: handler}
+
+	_, err := adapter.PreMigrationSource(context.Background(), &pb.PreMigrationSourceRequest{Vmi: []byte("not-valid-json{{{")})
+	if err == nil {
+		t.Fatal("expected error for invalid VMI JSON")
+	}
+
+	if !strings.Contains(err.Error(), "unmarshal VMI") {
+		t.Fatalf("expected VMI unmarshal error, got: %v", err)
+	}
+}
+
+func TestLauncherHookAdapterHandlerError(t *testing.T) {
+	handlerErr := fmt.Errorf("handler broke")
+	adapter := &launcherHookAdapter{guestDefinitionHandler: &errorGuestDefinitionHandler{err: handlerErr}}
+
+	_, err := adapter.GuestDefinition(context.Background(), &pb.GuestDefinitionRequest{
 		DomainType:     "libvirt",
 		Domain:         testDomainXML(t, "test"),
 		Vmi:            mustMarshalVMI(t, testVMI("test")),
@@ -478,8 +947,8 @@ func TestDomainHookAdapterHandlerError(t *testing.T) {
 }
 
 func TestNodeHookAdapterUnregisteredHookPoint(t *testing.T) {
-	adapter := &nodeHookAdapter{handlers: map[string]NodeHookHandler{
-		PreVMStart: &recordingNodeHandler{},
+	adapter := &nodeHookAdapter{handlers: map[NodeHookPoint]NodeHookHandler{
+		NodeHookPreVMStart: &recordingNodeHandler{},
 	}}
 
 	_, err := adapter.ExecuteNodeHook(context.Background(), &pb.ExecuteNodeHookRequest{
@@ -487,22 +956,18 @@ func TestNodeHookAdapterUnregisteredHookPoint(t *testing.T) {
 		Vmi:         mustMarshalVMI(t, testVMI("test")),
 		NodeContext: &pb.NodeContext{NodeName: "node-1"},
 	})
-	if err == nil {
-		t.Fatal("expected error for unregistered hook point")
-	}
-
-	if !strings.Contains(err.Error(), "no handler registered") {
-		t.Fatalf("expected unregistered hook point error, got: %v", err)
+	if status.Code(err) != codes.Unimplemented {
+		t.Fatalf("expected Unimplemented for unregistered hook point, got %v", err)
 	}
 }
 
 func TestNodeHookAdapterInvalidVMIJSON(t *testing.T) {
-	adapter := &nodeHookAdapter{handlers: map[string]NodeHookHandler{
-		PreVMStart: &recordingNodeHandler{},
+	adapter := &nodeHookAdapter{handlers: map[NodeHookPoint]NodeHookHandler{
+		NodeHookPreVMStart: &recordingNodeHandler{},
 	}}
 
 	_, err := adapter.ExecuteNodeHook(context.Background(), &pb.ExecuteNodeHookRequest{
-		HookPoint:   PreVMStart,
+		HookPoint:   string(NodeHookPreVMStart),
 		Vmi:         []byte("not-valid-json{{{"),
 		NodeContext: &pb.NodeContext{NodeName: "node-1"},
 	})
@@ -517,12 +982,12 @@ func TestNodeHookAdapterInvalidVMIJSON(t *testing.T) {
 
 func TestNodeHookAdapterHandlerError(t *testing.T) {
 	handlerErr := fmt.Errorf("node handler broke")
-	adapter := &nodeHookAdapter{handlers: map[string]NodeHookHandler{
-		PreVMStart: &errorNodeHandler{err: handlerErr},
+	adapter := &nodeHookAdapter{handlers: map[NodeHookPoint]NodeHookHandler{
+		NodeHookPreVMStart: &errorNodeHandler{err: handlerErr},
 	}}
 
 	_, err := adapter.ExecuteNodeHook(context.Background(), &pb.ExecuteNodeHookRequest{
-		HookPoint:   PreVMStart,
+		HookPoint:   string(NodeHookPreVMStart),
 		Vmi:         mustMarshalVMI(t, testVMI("test")),
 		NodeContext: &pb.NodeContext{NodeName: "node-1"},
 	})
@@ -535,47 +1000,47 @@ func TestNodeHookAdapterHandlerError(t *testing.T) {
 	}
 }
 
-type appendingDomainHandler struct {
+type appendingGuestDefinitionHandler struct {
 	suffix string
 	called bool
 }
 
-func (h *appendingDomainHandler) MutateDomain(_ context.Context, domain *libvirtxml.Domain, _ *v1.VirtualMachineInstance) error {
+func (h *appendingGuestDefinitionHandler) GuestDefinition(_ context.Context, req *GuestDefinitionRequest) error {
 	h.called = true
-	domain.Name = domain.Name + h.suffix
+	req.Domain.Name = req.Domain.Name + h.suffix
 	return nil
 }
 
-func TestServeWithEntrypointFiltersDomainHooks(t *testing.T) {
+func TestServeWithEntrypointFiltersLauncherHooks(t *testing.T) {
 	tmpDir := t.TempDir()
-	domainSock := filepath.Join(tmpDir, "domain.sock")
+	launcherSock := filepath.Join(tmpDir, "launcher.sock")
 
-	handlerA := &appendingDomainHandler{suffix: "-A"}
-	handlerB := &appendingDomainHandler{suffix: "-B"}
+	handlerA := &appendingGuestDefinitionHandler{suffix: "-A"}
+	handlerB := &appendingGuestDefinitionHandler{suffix: "-B"}
 
 	p := New("test-plugin").
-		WithDomainHook(ForLibvirt(handlerA).WithEntrypoint("ep-a")).
-		WithDomainHook(ForLibvirt(handlerB).WithEntrypoint("ep-b"))
+		WithLauncherHook(GuestDefinition(handlerA).WithEntrypoint("ep-a")).
+		WithLauncherHook(GuestDefinition(handlerB).WithEntrypoint("ep-b"))
 
 	stopCh := make(chan struct{})
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- p.Serve(withDomainSocketPath(domainSock), withStopCh(stopCh), withEntrypoint("ep-a"))
+		errCh <- p.Serve(withLauncherSocketPath(launcherSock), withStopCh(stopCh), withEntrypoint("ep-a"))
 	}()
 
-	waitForSocket(t, domainSock)
+	waitForSocket(t, launcherSock)
 
-	conn := dialSocket(t, domainSock)
-	client := pb.NewDomainHookServiceClient(conn)
+	conn := dialSocket(t, launcherSock)
+	client := pb.NewLauncherHookServiceClient(conn)
 
-	resp, err := client.MutateDomain(context.Background(), &pb.MutateDomainRequest{
+	resp, err := client.GuestDefinition(context.Background(), &pb.GuestDefinitionRequest{
 		DomainType:     "libvirt",
 		Domain:         testDomainXML(t, "original"),
 		Vmi:            mustMarshalVMI(t, testVMI("test")),
 		SidecarContext: &pb.SidecarContext{},
 	})
 	if err != nil {
-		t.Fatalf("MutateDomain RPC failed: %v", err)
+		t.Fatalf("GuestDefinition RPC failed: %v", err)
 	}
 
 	var result libvirtxml.Domain
@@ -607,8 +1072,8 @@ func TestServeWithEntrypointFiltersNodeHooks(t *testing.T) {
 	handlerB := &recordingNodeHandler{}
 
 	p := New("test-plugin").
-		WithNodeHook(PreVMStart, NodeHandler(handlerA).WithEntrypoint("ep-a")).
-		WithNodeHook(PostVMStop, NodeHandler(handlerB).WithEntrypoint("ep-b"))
+		WithNodeHook(NodeHookPreVMStart, NodeHandler(handlerA).WithEntrypoint("ep-a")).
+		WithNodeHook(NodeHookPostVMStop, NodeHandler(handlerB).WithEntrypoint("ep-b"))
 
 	stopCh := make(chan struct{})
 	errCh := make(chan error, 1)
@@ -622,7 +1087,7 @@ func TestServeWithEntrypointFiltersNodeHooks(t *testing.T) {
 	client := pb.NewNodeHookServiceClient(conn)
 
 	_, err := client.ExecuteNodeHook(context.Background(), &pb.ExecuteNodeHookRequest{
-		HookPoint:   PreVMStart,
+		HookPoint:   string(NodeHookPreVMStart),
 		Vmi:         mustMarshalVMI(t, testVMI("test")),
 		NodeContext: &pb.NodeContext{NodeName: "worker-1"},
 	})
@@ -630,8 +1095,8 @@ func TestServeWithEntrypointFiltersNodeHooks(t *testing.T) {
 		t.Fatalf("ExecuteNodeHook RPC failed: %v", err)
 	}
 
-	if handlerA.receivedHookPoint != PreVMStart {
-		t.Fatalf("expected handler A to receive %q, got %q", PreVMStart, handlerA.receivedHookPoint)
+	if handlerA.receivedHookPoint != NodeHookPreVMStart {
+		t.Fatalf("expected handler A to receive %q, got %q", NodeHookPreVMStart, handlerA.receivedHookPoint)
 	}
 
 	if handlerB.receivedHookPoint != "" {
@@ -644,8 +1109,8 @@ func TestServeWithEntrypointFiltersNodeHooks(t *testing.T) {
 
 func TestServeMixedEntrypointsWithoutFlagErrors(t *testing.T) {
 	p := New("test-plugin").
-		WithNodeHook(PreVMStart, NodeHandler(&stubNodeHandler{}).WithEntrypoint("ep-a")).
-		WithNodeHook(PostVMStop, NodeHandler(&stubNodeHandler{}).WithEntrypoint("ep-b"))
+		WithNodeHook(NodeHookPreVMStart, NodeHandler(&stubNodeHandler{}).WithEntrypoint("ep-a")).
+		WithNodeHook(NodeHookPostVMStop, NodeHandler(&stubNodeHandler{}).WithEntrypoint("ep-b"))
 
 	err := p.Serve()
 	if err == nil {
@@ -659,66 +1124,17 @@ func TestServeMixedEntrypointsWithoutFlagErrors(t *testing.T) {
 
 func TestServeSingleEntrypointNoFlagOK(t *testing.T) {
 	tmpDir := t.TempDir()
-	domainSock := filepath.Join(tmpDir, "domain.sock")
+	launcherSock := filepath.Join(tmpDir, "launcher.sock")
 
-	p := New("test-plugin").WithDomainHook(ForLibvirt(&stubDomainHandler{}))
-
-	stopCh := make(chan struct{})
-	errCh := make(chan error, 1)
-	go func() {
-		errCh <- p.Serve(withDomainSocketPath(domainSock), withStopCh(stopCh))
-	}()
-
-	waitForSocket(t, domainSock)
-
-	close(stopCh)
-	awaitServeStop(t, errCh)
-}
-
-func TestServeMultipleDomainHooksSameEntrypoint(t *testing.T) {
-	tmpDir := t.TempDir()
-	domainSock := filepath.Join(tmpDir, "domain.sock")
-
-	handler1 := &appendingDomainHandler{suffix: "-first"}
-	handler2 := &appendingDomainHandler{suffix: "-second"}
-
-	p := New("test-plugin").
-		WithDomainHook(ForLibvirt(handler1)).
-		WithDomainHook(ForLibvirt(handler2))
+	p := New("test-plugin").WithLauncherHook(GuestDefinition(&stubGuestDefinitionHandler{}))
 
 	stopCh := make(chan struct{})
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- p.Serve(withDomainSocketPath(domainSock), withStopCh(stopCh))
+		errCh <- p.Serve(withLauncherSocketPath(launcherSock), withStopCh(stopCh))
 	}()
 
-	waitForSocket(t, domainSock)
-
-	conn := dialSocket(t, domainSock)
-	client := pb.NewDomainHookServiceClient(conn)
-
-	resp, err := client.MutateDomain(context.Background(), &pb.MutateDomainRequest{
-		DomainType:     "libvirt",
-		Domain:         testDomainXML(t, "original"),
-		Vmi:            mustMarshalVMI(t, testVMI("test")),
-		SidecarContext: &pb.SidecarContext{},
-	})
-	if err != nil {
-		t.Fatalf("MutateDomain RPC failed: %v", err)
-	}
-
-	var result libvirtxml.Domain
-	if err := result.Unmarshal(string(resp.Domain)); err != nil {
-		t.Fatalf("failed to unmarshal response: %v", err)
-	}
-
-	if result.Name != "original-first-second" {
-		t.Fatalf("expected chained mutation 'original-first-second', got %q", result.Name)
-	}
-
-	if !handler1.called || !handler2.called {
-		t.Fatal("expected both handlers to be called")
-	}
+	waitForSocket(t, launcherSock)
 
 	close(stopCh)
 	awaitServeStop(t, errCh)
@@ -737,56 +1153,8 @@ func TestServeWithNoHooks(t *testing.T) {
 	}
 }
 
-func TestChainedDomainHookFirstErrorStopsChain(t *testing.T) {
-	errHandler := &errorDomainHandler{err: fmt.Errorf("first handler failed")}
-	secondHandler := &appendingDomainHandler{suffix: "-second"}
-
-	chained := &chainedDomainHandler{handlers: []LibvirtDomainHookHandler{errHandler, secondHandler}}
-
-	domain := &libvirtxml.Domain{Name: "test"}
-	err := chained.MutateDomain(context.Background(), domain, testVMI("test"))
-
-	if err == nil {
-		t.Fatal("expected error from first handler")
-	}
-
-	if !strings.Contains(err.Error(), "first handler failed") {
-		t.Fatalf("expected first handler error, got: %v", err)
-	}
-
-	if secondHandler.called {
-		t.Fatal("expected second handler to NOT be called when first errors")
-	}
-}
-
-func TestChainedDomainHookSecondErrorPropagated(t *testing.T) {
-	firstHandler := &appendingDomainHandler{suffix: "-first"}
-	errHandler := &errorDomainHandler{err: fmt.Errorf("second handler failed")}
-
-	chained := &chainedDomainHandler{handlers: []LibvirtDomainHookHandler{firstHandler, errHandler}}
-
-	domain := &libvirtxml.Domain{Name: "test"}
-	err := chained.MutateDomain(context.Background(), domain, testVMI("test"))
-
-	if err == nil {
-		t.Fatal("expected error from second handler")
-	}
-
-	if !strings.Contains(err.Error(), "second handler failed") {
-		t.Fatalf("expected second handler error, got: %v", err)
-	}
-
-	if !firstHandler.called {
-		t.Fatal("expected first handler to be called before second errors")
-	}
-
-	if domain.Name != "test-first" {
-		t.Fatalf("expected domain name 'test-first' after first handler, got %q", domain.Name)
-	}
-}
-
 func TestServeNonExistentEntrypointErrors(t *testing.T) {
-	p := New("test-plugin").WithNodeHook(PreVMStart, NodeHandler(&stubNodeHandler{}))
+	p := New("test-plugin").WithNodeHook(NodeHookPreVMStart, NodeHandler(&stubNodeHandler{}))
 
 	err := p.Serve(withEntrypoint("non-existent"))
 	if err == nil {
@@ -799,46 +1167,46 @@ func TestServeNonExistentEntrypointErrors(t *testing.T) {
 }
 
 func TestServeCELOnlyPluginErrors(t *testing.T) {
-	p := New("test-plugin").WithDomainCELHook("Domain{Name: 'test'}")
+	p := New("test-plugin").WithLauncherHook(GuestDefinitionCEL("Domain{Name: 'test'}"))
 
 	err := p.Serve()
 	if err == nil {
 		t.Fatal("expected error when serving CEL-only plugin")
 	}
 
-	if !strings.Contains(err.Error(), "CEL domain hooks") {
+	if !strings.Contains(err.Error(), "CEL launcher hooks") {
 		t.Fatalf("expected CEL-specific error message, got: %v", err)
 	}
 }
 
 func TestServeMixedSidecarAndCEL(t *testing.T) {
 	tmpDir := t.TempDir()
-	domainSock := filepath.Join(tmpDir, "domain.sock")
+	launcherSock := filepath.Join(tmpDir, "launcher.sock")
 
-	handler := &mutatingDomainHandler{}
+	handler := &mutatingGuestDefinitionHandler{}
 	p := New("test-plugin").
-		WithDomainHook(ForLibvirt(handler)).
-		WithDomainCELHook("Domain{Name: 'test'}")
+		WithLauncherHook(GuestDefinition(handler)).
+		WithLauncherHook(GuestDefinitionCEL("Domain{Name: 'test'}"))
 
 	stopCh := make(chan struct{})
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- p.Serve(withDomainSocketPath(domainSock), withStopCh(stopCh))
+		errCh <- p.Serve(withLauncherSocketPath(launcherSock), withStopCh(stopCh))
 	}()
 
-	waitForSocket(t, domainSock)
+	waitForSocket(t, launcherSock)
 
-	conn := dialSocket(t, domainSock)
-	client := pb.NewDomainHookServiceClient(conn)
+	conn := dialSocket(t, launcherSock)
+	client := pb.NewLauncherHookServiceClient(conn)
 
-	resp, err := client.MutateDomain(context.Background(), &pb.MutateDomainRequest{
+	resp, err := client.GuestDefinition(context.Background(), &pb.GuestDefinitionRequest{
 		DomainType:     "libvirt",
 		Domain:         testDomainXML(t, "original"),
 		Vmi:            mustMarshalVMI(t, testVMI("test")),
 		SidecarContext: &pb.SidecarContext{},
 	})
 	if err != nil {
-		t.Fatalf("MutateDomain RPC failed: %v", err)
+		t.Fatalf("GuestDefinition RPC failed: %v", err)
 	}
 
 	var result libvirtxml.Domain
@@ -854,7 +1222,7 @@ func TestServeMixedSidecarAndCEL(t *testing.T) {
 	awaitServeStop(t, errCh)
 }
 
-func TestServeWithSidecarArgsServesOnlyDomainHooks(t *testing.T) {
+func TestServeWithSidecarArgsServesOnlyLauncherHooks(t *testing.T) {
 	tests := []struct {
 		name       string
 		entrypoint string
@@ -865,17 +1233,17 @@ func TestServeWithSidecarArgsServesOnlyDomainHooks(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			domainSock := filepath.Join(t.TempDir(), "domain.sock")
+			launcherSock := filepath.Join(t.TempDir(), "launcher.sock")
 			nodeSock := unservableSocketPath(t)
 
 			plugin := New("test-plugin").
-				WithDomainHook(ForLibvirt(&stubDomainHandler{}).WithEntrypoint(test.entrypoint)).
-				WithNodeHook(PreVMStart, NodeHandler(&stubNodeHandler{}).WithEntrypoint(test.entrypoint))
+				WithLauncherHook(GuestDefinition(&stubGuestDefinitionHandler{}).WithEntrypoint(test.entrypoint)).
+				WithNodeHook(NodeHookPreVMStart, NodeHandler(&stubNodeHandler{}).WithEntrypoint(test.entrypoint))
 
 			stopCh := make(chan struct{})
-			errCh := serveWithArgs(t, plugin, plugin.sidecarArgs(plugin.resolveEntrypoint(test.entrypoint)), domainSock, nodeSock, stopCh)
+			errCh := serveWithArgs(t, plugin, plugin.sidecarArgs(plugin.resolveEntrypoint(test.entrypoint)), launcherSock, nodeSock, stopCh)
 
-			waitForSocketWhileServing(t, domainSock, errCh)
+			waitForSocketWhileServing(t, launcherSock, errCh)
 
 			close(stopCh)
 			awaitServeStop(t, errCh)
@@ -894,15 +1262,15 @@ func TestServeWithDaemonSetArgsServesOnlyNodeHooks(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			domainSock := unservableSocketPath(t)
+			launcherSock := unservableSocketPath(t)
 			nodeSock := filepath.Join(t.TempDir(), "node.sock")
 
 			plugin := New("test-plugin").
-				WithDomainHook(ForLibvirt(&stubDomainHandler{}).WithEntrypoint(test.entrypoint)).
-				WithNodeHook(PreVMStart, NodeHandler(&stubNodeHandler{}).WithEntrypoint(test.entrypoint))
+				WithLauncherHook(GuestDefinition(&stubGuestDefinitionHandler{}).WithEntrypoint(test.entrypoint)).
+				WithNodeHook(NodeHookPreVMStart, NodeHandler(&stubNodeHandler{}).WithEntrypoint(test.entrypoint))
 
 			stopCh := make(chan struct{})
-			errCh := serveWithArgs(t, plugin, plugin.daemonSetArgs(plugin.resolveEntrypoint(test.entrypoint)), domainSock, nodeSock, stopCh)
+			errCh := serveWithArgs(t, plugin, plugin.daemonSetArgs(plugin.resolveEntrypoint(test.entrypoint)), launcherSock, nodeSock, stopCh)
 
 			waitForSocketWhileServing(t, nodeSock, errCh)
 
@@ -914,29 +1282,29 @@ func TestServeWithDaemonSetArgsServesOnlyNodeHooks(t *testing.T) {
 
 func TestServeWithDefaultEntrypointArgsAlongsideNamedEntrypoint(t *testing.T) {
 	plugin := New("test-plugin").
-		WithDomainHook(ForLibvirt(&stubDomainHandler{})).
-		WithNodeHook(PreVMStart, NodeHandler(&stubNodeHandler{})).
-		WithDomainHook(ForLibvirt(&stubDomainHandler{}).WithEntrypoint("ep-a"))
+		WithLauncherHook(GuestDefinition(&stubGuestDefinitionHandler{})).
+		WithNodeHook(NodeHookPreVMStart, NodeHandler(&stubNodeHandler{})).
+		WithLauncherHook(GuestDefinition(&stubGuestDefinitionHandler{}).WithEntrypoint("ep-a"))
 
 	t.Run("sidecar", func(t *testing.T) {
-		domainSock := filepath.Join(t.TempDir(), "domain.sock")
+		launcherSock := filepath.Join(t.TempDir(), "launcher.sock")
 		nodeSock := filepath.Join(t.TempDir(), "node.sock")
 
 		stopCh := make(chan struct{})
-		errCh := serveWithArgs(t, plugin, plugin.sidecarArgs("test-plugin"), domainSock, nodeSock, stopCh)
+		errCh := serveWithArgs(t, plugin, plugin.sidecarArgs("test-plugin"), launcherSock, nodeSock, stopCh)
 
-		waitForSocketWhileServing(t, domainSock, errCh)
+		waitForSocketWhileServing(t, launcherSock, errCh)
 
 		close(stopCh)
 		awaitServeStop(t, errCh)
 	})
 
 	t.Run("daemonset", func(t *testing.T) {
-		domainSock := filepath.Join(t.TempDir(), "domain.sock")
+		launcherSock := filepath.Join(t.TempDir(), "launcher.sock")
 		nodeSock := filepath.Join(t.TempDir(), "node.sock")
 
 		stopCh := make(chan struct{})
-		errCh := serveWithArgs(t, plugin, plugin.daemonSetArgs("test-plugin"), domainSock, nodeSock, stopCh)
+		errCh := serveWithArgs(t, plugin, plugin.daemonSetArgs("test-plugin"), launcherSock, nodeSock, stopCh)
 
 		waitForSocketWhileServing(t, nodeSock, errCh)
 
@@ -1003,8 +1371,8 @@ func TestServeWithRoleWithoutMatchingHooksErrors(t *testing.T) {
 		role          string
 		expectedError string
 	}{
-		{name: "sidecar without domain hooks", plugin: New("test-plugin").WithNodeHook(PreVMStart, NodeHandler(&stubNodeHandler{})), role: roleSidecar, expectedError: "no domain hooks registered"},
-		{name: "daemonset without node hooks", plugin: New("test-plugin").WithDomainHook(ForLibvirt(&stubDomainHandler{})), role: roleDaemonSet, expectedError: "no node hooks registered"},
+		{name: "sidecar without launcher hooks", plugin: New("test-plugin").WithNodeHook(NodeHookPreVMStart, NodeHandler(&stubNodeHandler{})), role: roleSidecar, expectedError: "no launcher hooks registered"},
+		{name: "daemonset without node hooks", plugin: New("test-plugin").WithLauncherHook(GuestDefinition(&stubGuestDefinitionHandler{})), role: roleDaemonSet, expectedError: "no node hooks registered"},
 	}
 
 	for _, test := range tests {
@@ -1023,12 +1391,12 @@ func TestServeWithRoleWithoutMatchingHooksErrors(t *testing.T) {
 
 func TestServeBothHookKindsWithoutRoleErrors(t *testing.T) {
 	plugin := New("test-plugin").
-		WithDomainHook(ForLibvirt(&stubDomainHandler{})).
-		WithNodeHook(PreVMStart, NodeHandler(&stubNodeHandler{}))
+		WithLauncherHook(GuestDefinition(&stubGuestDefinitionHandler{})).
+		WithNodeHook(NodeHookPreVMStart, NodeHandler(&stubNodeHandler{}))
 
 	err := plugin.Serve()
 	if err == nil {
-		t.Fatal("expected error when serving domain and node hooks without a role")
+		t.Fatal("expected error when serving launcher and node hooks without a role")
 	}
 
 	if !strings.Contains(err.Error(), "use --role") {

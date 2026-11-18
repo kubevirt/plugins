@@ -10,47 +10,22 @@ import (
 
 	celgo "github.com/google/cel-go/cel"
 	"gopkg.in/yaml.v2"
+	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
+	pluginv1alpha1 "kubevirt.io/api/plugin/v1alpha1"
+	sigsyaml "sigs.k8s.io/yaml"
 )
 
 // Test-local types for YAML verification
-
-type testPluginCR struct {
-	APIVersion string `yaml:"apiVersion"`
-	Kind       string `yaml:"kind"`
-	Metadata   struct {
-		Name string `yaml:"name"`
-	} `yaml:"metadata"`
-	Spec struct {
-		Condition       string `yaml:"condition,omitempty"`
-		FailureStrategy string `yaml:"failureStrategy,omitempty"`
-		DomainHooks     []struct {
-			CEL *struct {
-				Expression string `yaml:"expression"`
-			} `yaml:"cel,omitempty"`
-			Sidecar *struct {
-				SocketPath string `yaml:"socketPath"`
-			} `yaml:"sidecar,omitempty"`
-			Condition       string `yaml:"condition,omitempty"`
-			FailureStrategy string `yaml:"failureStrategy,omitempty"`
-			Timeout         string `yaml:"timeout,omitempty"`
-		} `yaml:"domainHooks,omitempty"`
-		NodeHooks []struct {
-			PermittedHooks  []string `yaml:"permittedHooks"`
-			Socket          string   `yaml:"socket"`
-			Condition       string   `yaml:"condition,omitempty"`
-			FailureStrategy string   `yaml:"failureStrategy,omitempty"`
-			Timeout         string   `yaml:"timeout,omitempty"`
-		} `yaml:"nodeHooks,omitempty"`
-	} `yaml:"spec"`
-}
 
 type testDaemonSet struct {
 	APIVersion string `yaml:"apiVersion"`
 	Kind       string `yaml:"kind"`
 	Metadata   struct {
-		Name   string            `yaml:"name"`
-		Labels map[string]string `yaml:"labels"`
+		Name      string            `yaml:"name"`
+		Namespace string            `yaml:"namespace"`
+		Labels    map[string]string `yaml:"labels"`
 	} `yaml:"metadata"`
 	Spec struct {
 		Selector struct {
@@ -87,7 +62,8 @@ type testK8sResource struct {
 	APIVersion string `yaml:"apiVersion"`
 	Kind       string `yaml:"kind"`
 	Metadata   struct {
-		Name string `yaml:"name"`
+		Name      string `yaml:"name"`
+		Namespace string `yaml:"namespace"`
 	} `yaml:"metadata"`
 }
 
@@ -189,6 +165,44 @@ func readAndUnmarshal(t *testing.T, path string, v any) {
 	}
 }
 
+func readPluginCR(t *testing.T, dir string) pluginv1alpha1.Plugin {
+	t.Helper()
+
+	data, err := os.ReadFile(findGeneratedFile(t, dir, "plugin.yaml"))
+	if err != nil {
+		t.Fatalf("failed to read plugin.yaml: %v", err)
+	}
+
+	var cr pluginv1alpha1.Plugin
+	if err := sigsyaml.Unmarshal(data, &cr); err != nil {
+		t.Fatalf("failed to unmarshal plugin.yaml: %v\nContent:\n%s", err, string(data))
+	}
+
+	return cr
+}
+
+// assertSocketPathCRDRules checks the CRD validation rules for a sidecar
+// launcher hook socket path.
+func assertSocketPathCRDRules(t *testing.T, socketPath, pluginName string) {
+	t.Helper()
+
+	if !strings.HasPrefix(socketPath, "/var/run/kubevirt-plugin/"+pluginName+"/") {
+		t.Fatalf("socketPath %q must start with /var/run/kubevirt-plugin/%s/", socketPath, pluginName)
+	}
+
+	if !strings.HasSuffix(socketPath, ".sock") {
+		t.Fatalf("socketPath %q must end with .sock", socketPath)
+	}
+
+	if len(socketPath) > 107 {
+		t.Fatalf("socketPath %q must be no longer than 107 bytes", socketPath)
+	}
+
+	if strings.Contains(socketPath, "..") || strings.Contains(socketPath, "//") || strings.HasSuffix(socketPath, "/") {
+		t.Fatalf("socketPath %q must be a clean path", socketPath)
+	}
+}
+
 func readFileContent(t *testing.T, path string) string {
 	t.Helper()
 
@@ -277,13 +291,12 @@ func TestGeneratePluginCRNodeHookOnly(t *testing.T) {
 	sourceDir := setupSourceDir(t)
 	outputDir := filepath.Join(t.TempDir(), "deploy")
 
-	p := New("test-plugin").WithNodeHook(PreVMStart, NodeHandler(&stubNodeHandler{}))
+	p := New("test-plugin").WithNodeHook(NodeHookPreVMStart, NodeHandler(&stubNodeHandler{}))
 	if err := p.generate(outputDir, sourceDir); err != nil {
 		t.Fatal(err)
 	}
 
-	var cr testPluginCR
-	readAndUnmarshal(t, findGeneratedFile(t, outputDir, "plugin.yaml"), &cr)
+	cr := readPluginCR(t, outputDir)
 
 	if cr.APIVersion != "plugin.kubevirt.io/v1alpha1" {
 		t.Fatalf("expected apiVersion plugin.kubevirt.io/v1alpha1, got %q", cr.APIVersion)
@@ -293,68 +306,77 @@ func TestGeneratePluginCRNodeHookOnly(t *testing.T) {
 		t.Fatalf("expected kind Plugin, got %q", cr.Kind)
 	}
 
-	if cr.Metadata.Name != "test-plugin" {
-		t.Fatalf("expected name test-plugin, got %q", cr.Metadata.Name)
+	if cr.Name != "test-plugin" {
+		t.Fatalf("expected name test-plugin, got %q", cr.Name)
 	}
 
 	if len(cr.Spec.NodeHooks) != 1 {
 		t.Fatalf("expected 1 nodeHook, got %d", len(cr.Spec.NodeHooks))
 	}
 
-	if len(cr.Spec.NodeHooks[0].PermittedHooks) != 1 || cr.Spec.NodeHooks[0].PermittedHooks[0] != PreVMStart {
-		t.Fatalf("expected permittedHooks [%q], got %v", PreVMStart, cr.Spec.NodeHooks[0].PermittedHooks)
+	if len(cr.Spec.NodeHooks[0].PermittedHooks) != 1 || cr.Spec.NodeHooks[0].PermittedHooks[0] != pluginv1alpha1.NodeHookPreVMStart {
+		t.Fatalf("expected permittedHooks [%q], got %v", pluginv1alpha1.NodeHookPreVMStart, cr.Spec.NodeHooks[0].PermittedHooks)
 	}
 
 	if cr.Spec.NodeHooks[0].Socket != "/var/run/kubevirt/plugins/test-plugin/node.sock" {
 		t.Fatalf("expected socket /var/run/kubevirt/plugins/test-plugin/node.sock, got %q", cr.Spec.NodeHooks[0].Socket)
 	}
 
-	if len(cr.Spec.DomainHooks) != 0 {
-		t.Fatal("expected no domainHooks")
+	if len(cr.Spec.LauncherHooks) != 0 {
+		t.Fatal("expected no launcherHooks")
 	}
 }
 
-func TestGeneratePluginCRDomainHookOnly(t *testing.T) {
+func TestGeneratePluginCRLauncherHookOnly(t *testing.T) {
 	sourceDir := setupSourceDir(t)
 	outputDir := filepath.Join(t.TempDir(), "deploy")
 
-	p := New("test-plugin").WithDomainHook(ForLibvirt(&stubDomainHandler{}))
+	p := New("test-plugin").WithLauncherHook(GuestDefinition(&stubGuestDefinitionHandler{}))
 	if err := p.generate(outputDir, sourceDir); err != nil {
 		t.Fatal(err)
 	}
 
-	var cr testPluginCR
-	readAndUnmarshal(t, findGeneratedFile(t, outputDir, "plugin.yaml"), &cr)
+	cr := readPluginCR(t, outputDir)
 
-	if len(cr.Spec.DomainHooks) != 1 {
-		t.Fatalf("expected 1 domainHook, got %d", len(cr.Spec.DomainHooks))
+	if len(cr.Spec.LauncherHooks) != 1 {
+		t.Fatalf("expected 1 launcher hook, got %d", len(cr.Spec.LauncherHooks))
 	}
 
-	if cr.Spec.DomainHooks[0].Sidecar.SocketPath != "/var/run/kubevirt-plugin/test-plugin/domain.sock" {
-		t.Fatalf("expected sidecar socket path, got %q", cr.Spec.DomainHooks[0].Sidecar.SocketPath)
+	hook := cr.Spec.LauncherHooks[0]
+	if hook.CEL != nil {
+		t.Fatal("expected a sidecar hook")
 	}
+
+	if hook.Sidecar == nil || hook.Sidecar.SocketPath != "/var/run/kubevirt-plugin/test-plugin/launcher.sock" {
+		t.Fatalf("expected sidecar socket path, got %+v", hook.Sidecar)
+	}
+
+	if !slices.Contains(hook.Sidecar.PermittedHooks, pluginv1alpha1.LauncherHookGuestDefinition) {
+		t.Fatalf("expected permittedHooks to contain GuestDefinition, got %v", hook.Sidecar.PermittedHooks)
+	}
+
+	assertSocketPathCRDRules(t, hook.Sidecar.SocketPath, "test-plugin")
 
 	if len(cr.Spec.NodeHooks) != 0 {
 		t.Fatal("expected no nodeHooks")
 	}
 }
 
-func TestGeneratePluginCRBothHooks(t *testing.T) {
+func TestGeneratePluginCRBothHookKinds(t *testing.T) {
 	sourceDir := setupSourceDir(t)
 	outputDir := filepath.Join(t.TempDir(), "deploy")
 
 	p := New("test-plugin").
-		WithDomainHook(ForLibvirt(&stubDomainHandler{})).
-		WithNodeHook(PreVMStart, NodeHandler(&stubNodeHandler{}))
+		WithLauncherHook(GuestDefinition(&stubGuestDefinitionHandler{})).
+		WithNodeHook(NodeHookPreVMStart, NodeHandler(&stubNodeHandler{}))
 	if err := p.generate(outputDir, sourceDir); err != nil {
 		t.Fatal(err)
 	}
 
-	var cr testPluginCR
-	readAndUnmarshal(t, findGeneratedFile(t, outputDir, "plugin.yaml"), &cr)
+	cr := readPluginCR(t, outputDir)
 
-	if len(cr.Spec.DomainHooks) != 1 {
-		t.Fatalf("expected 1 domainHook, got %d", len(cr.Spec.DomainHooks))
+	if len(cr.Spec.LauncherHooks) != 1 {
+		t.Fatalf("expected 1 launcher hook, got %d", len(cr.Spec.LauncherHooks))
 	}
 
 	if len(cr.Spec.NodeHooks) != 1 {
@@ -367,16 +389,15 @@ func TestGeneratePluginCRWithCondition(t *testing.T) {
 	outputDir := filepath.Join(t.TempDir(), "deploy")
 
 	p := New("test-plugin").
-		WithNodeHook(PreVMStart, NodeHandler(&stubNodeHandler{})).
-		WithCondition("vmi.metadata.name == 'test'")
+		WithNodeHook(NodeHookPreVMStart, NodeHandler(&stubNodeHandler{})).
+		WithCondition("vmi.Name == 'test'")
 	if err := p.generate(outputDir, sourceDir); err != nil {
 		t.Fatal(err)
 	}
 
-	var cr testPluginCR
-	readAndUnmarshal(t, findGeneratedFile(t, outputDir, "plugin.yaml"), &cr)
+	cr := readPluginCR(t, outputDir)
 
-	if cr.Spec.Condition != "vmi.metadata.name == 'test'" {
+	if cr.Spec.Condition != "vmi.Name == 'test'" {
 		t.Fatalf("expected condition, got %q", cr.Spec.Condition)
 	}
 }
@@ -386,9 +407,9 @@ func TestGeneratePluginCRWithPerHookSettings(t *testing.T) {
 	outputDir := filepath.Join(t.TempDir(), "deploy")
 
 	timeout := 30 * time.Second
-	p := New("test-plugin").WithNodeHook(PreVMStart,
+	p := New("test-plugin").WithNodeHook(NodeHookPreVMStart,
 		NodeHandler(&stubNodeHandler{}).
-			WithCondition("vmi.metadata.name == 'test'").
+			WithCondition("vmi.Name == 'test'").
 			WithFailureStrategy(Ignore).
 			WithTimeout(timeout),
 	)
@@ -396,8 +417,7 @@ func TestGeneratePluginCRWithPerHookSettings(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	var cr testPluginCR
-	readAndUnmarshal(t, findGeneratedFile(t, outputDir, "plugin.yaml"), &cr)
+	cr := readPluginCR(t, outputDir)
 
 	if len(cr.Spec.NodeHooks) != 1 {
 		t.Fatalf("expected 1 nodeHook, got %d", len(cr.Spec.NodeHooks))
@@ -405,16 +425,295 @@ func TestGeneratePluginCRWithPerHookSettings(t *testing.T) {
 
 	nodeHook := cr.Spec.NodeHooks[0]
 
-	if nodeHook.Condition != "vmi.metadata.name == 'test'" {
+	if nodeHook.Condition != "vmi.Name == 'test'" {
 		t.Fatalf("expected per-hook condition, got %q", nodeHook.Condition)
 	}
 
-	if nodeHook.FailureStrategy != "Ignore" {
+	if nodeHook.FailureStrategy != pluginv1alpha1.FailureStrategyIgnore {
 		t.Fatalf("expected failureStrategy Ignore, got %q", nodeHook.FailureStrategy)
 	}
 
-	if nodeHook.Timeout != "30s" {
-		t.Fatalf("expected timeout 30s, got %q", nodeHook.Timeout)
+	if nodeHook.Timeout == nil || nodeHook.Timeout.Duration != timeout {
+		t.Fatalf("expected timeout %v, got %v", timeout, nodeHook.Timeout)
+	}
+}
+
+func TestGeneratePluginCRLauncherHookPerHookSettings(t *testing.T) {
+	sourceDir := setupSourceDir(t)
+	outputDir := filepath.Join(t.TempDir(), "deploy")
+
+	timeout := 45 * time.Second
+	p := New("test-plugin").WithLauncherHook(
+		GuestDefinition(&stubGuestDefinitionHandler{}).
+			WithCondition("vmi.Name == 'test'").
+			WithFailureStrategy(Ignore).
+			WithTimeout(timeout),
+	)
+	if err := p.generate(outputDir, sourceDir); err != nil {
+		t.Fatal(err)
+	}
+
+	cr := readPluginCR(t, outputDir)
+
+	if len(cr.Spec.LauncherHooks) != 1 {
+		t.Fatalf("expected 1 launcher hook, got %d", len(cr.Spec.LauncherHooks))
+	}
+
+	hook := cr.Spec.LauncherHooks[0]
+
+	if hook.Condition != "vmi.Name == 'test'" {
+		t.Fatalf("expected per-hook condition, got %q", hook.Condition)
+	}
+
+	if hook.FailureStrategy != pluginv1alpha1.FailureStrategyIgnore {
+		t.Fatalf("expected failureStrategy Ignore, got %q", hook.FailureStrategy)
+	}
+
+	if hook.Timeout == nil || hook.Timeout.Duration != timeout {
+		t.Fatalf("expected timeout %v, got %v", timeout, hook.Timeout)
+	}
+}
+
+func TestGeneratePluginCRRendersOnVMStop(t *testing.T) {
+	sourceDir := setupSourceDir(t)
+	outputDir := filepath.Join(t.TempDir(), "deploy")
+
+	p := New("test-plugin").WithNodeHook(NodeHookOnVMStop, NodeHandler(&stubNodeHandler{}))
+	if err := p.generate(outputDir, sourceDir); err != nil {
+		t.Fatal(err)
+	}
+
+	cr := readPluginCR(t, outputDir)
+
+	if len(cr.Spec.NodeHooks) != 1 {
+		t.Fatalf("expected 1 nodeHook, got %d", len(cr.Spec.NodeHooks))
+	}
+
+	if len(cr.Spec.NodeHooks[0].PermittedHooks) != 1 || cr.Spec.NodeHooks[0].PermittedHooks[0] != pluginv1alpha1.NodeHookOnVMStop {
+		t.Fatalf("expected permittedHooks [%q], got %v", pluginv1alpha1.NodeHookOnVMStop, cr.Spec.NodeHooks[0].PermittedHooks)
+	}
+}
+
+func TestGeneratePluginCRKeepsPluginFailureStrategyAtPluginLevel(t *testing.T) {
+	sourceDir := setupSourceDir(t)
+	outputDir := filepath.Join(t.TempDir(), "deploy")
+
+	p := New("test-plugin").
+		WithFailureStrategy(Ignore).
+		WithNodeHook(NodeHookPreVMStart, NodeHandler(&stubNodeHandler{})).
+		WithNodeHook(NodeHookPostVMStop, NodeHandler(&stubNodeHandler{}).WithFailureStrategy(Fail))
+	if err := p.generate(outputDir, sourceDir); err != nil {
+		t.Fatal(err)
+	}
+
+	cr := readPluginCR(t, outputDir)
+
+	if len(cr.Spec.NodeHooks) != 2 {
+		t.Fatalf("expected 2 nodeHooks, got %d", len(cr.Spec.NodeHooks))
+	}
+
+	if cr.Spec.FailureStrategy != pluginv1alpha1.FailureStrategyIgnore {
+		t.Fatalf("expected plugin-level failureStrategy Ignore, got %q", cr.Spec.FailureStrategy)
+	}
+
+	if cr.Spec.NodeHooks[0].FailureStrategy != "" {
+		t.Fatalf("expected no failureStrategy on the node hook without an explicit strategy, got %q", cr.Spec.NodeHooks[0].FailureStrategy)
+	}
+
+	if cr.Spec.NodeHooks[1].FailureStrategy != pluginv1alpha1.FailureStrategyFail {
+		t.Fatalf("expected explicit node hook failureStrategy Fail to be kept, got %q", cr.Spec.NodeHooks[1].FailureStrategy)
+	}
+}
+
+func TestGeneratePluginCRKeepsPluginFailureStrategyOutOfLauncherHooks(t *testing.T) {
+	sourceDir := setupSourceDir(t)
+	outputDir := filepath.Join(t.TempDir(), "deploy")
+
+	p := New("test-plugin").
+		WithFailureStrategy(Ignore).
+		WithLauncherHook(GuestDefinition(&stubGuestDefinitionHandler{}))
+	if err := p.generate(outputDir, sourceDir); err != nil {
+		t.Fatal(err)
+	}
+
+	cr := readPluginCR(t, outputDir)
+
+	if len(cr.Spec.LauncherHooks) != 1 {
+		t.Fatalf("expected 1 launcher hook, got %d", len(cr.Spec.LauncherHooks))
+	}
+
+	if cr.Spec.FailureStrategy != pluginv1alpha1.FailureStrategyIgnore {
+		t.Fatalf("expected plugin-level failureStrategy Ignore, got %q", cr.Spec.FailureStrategy)
+	}
+
+	if cr.Spec.LauncherHooks[0].FailureStrategy != "" {
+		t.Fatalf("expected the launcher hook entry to stay empty, got %q", cr.Spec.LauncherHooks[0].FailureStrategy)
+	}
+}
+
+func TestGeneratePluginCRNodeHookWithoutAnyFailureStrategy(t *testing.T) {
+	sourceDir := setupSourceDir(t)
+	outputDir := filepath.Join(t.TempDir(), "deploy")
+
+	p := New("test-plugin").WithNodeHook(NodeHookPreVMStart, NodeHandler(&stubNodeHandler{}))
+	if err := p.generate(outputDir, sourceDir); err != nil {
+		t.Fatal(err)
+	}
+
+	cr := readPluginCR(t, outputDir)
+
+	if len(cr.Spec.NodeHooks) != 1 {
+		t.Fatalf("expected 1 nodeHook, got %d", len(cr.Spec.NodeHooks))
+	}
+
+	if cr.Spec.NodeHooks[0].FailureStrategy != "" {
+		t.Fatalf("expected no failureStrategy on the node hook, got %q", cr.Spec.NodeHooks[0].FailureStrategy)
+	}
+}
+
+func TestGeneratePluginCRHasNoCreationTimestampOrStatus(t *testing.T) {
+	sourceDir := setupSourceDir(t)
+	outputDir := filepath.Join(t.TempDir(), "deploy")
+
+	p := New("test-plugin").WithLauncherHook(GuestDefinition(&stubGuestDefinitionHandler{}))
+	if err := p.generate(outputDir, sourceDir); err != nil {
+		t.Fatal(err)
+	}
+
+	content := readFileContent(t, findGeneratedFile(t, outputDir, "plugin.yaml"))
+
+	if strings.Contains(content, "creationTimestamp") {
+		t.Fatalf("expected no creationTimestamp in plugin.yaml, got:\n%s", content)
+	}
+
+	if strings.Contains(content, "status") {
+		t.Fatalf("expected no status in plugin.yaml, got:\n%s", content)
+	}
+}
+
+func TestGeneratePluginCRLauncherHooksInDeclarationOrder(t *testing.T) {
+	sourceDir := setupSourceDir(t)
+	outputDir := filepath.Join(t.TempDir(), "deploy")
+
+	p := New("test-plugin").
+		WithLauncherHook(GuestDefinitionCEL("Domain{Name: 'cel-first'}")).
+		WithLauncherHook(GuestDefinition(&stubGuestDefinitionHandler{})).
+		WithLauncherHook(PreBoot(&stubPreBootHandler{})).
+		WithLauncherHook(GuestDefinitionCEL("Domain{Name: 'cel-last'}"))
+	if err := p.generate(outputDir, sourceDir); err != nil {
+		t.Fatal(err)
+	}
+
+	cr := readPluginCR(t, outputDir)
+
+	if len(cr.Spec.LauncherHooks) != 4 {
+		t.Fatalf("expected 4 launcher hooks, got %d", len(cr.Spec.LauncherHooks))
+	}
+
+	if cr.Spec.LauncherHooks[0].CEL == nil || cr.Spec.LauncherHooks[0].CEL.Expression != "Domain{Name: 'cel-first'}" {
+		t.Fatalf("expected first hook to be the first CEL hook, got %+v", cr.Spec.LauncherHooks[0])
+	}
+
+	if cr.Spec.LauncherHooks[1].Sidecar == nil || !slices.Contains(cr.Spec.LauncherHooks[1].Sidecar.PermittedHooks, pluginv1alpha1.LauncherHookGuestDefinition) {
+		t.Fatalf("expected second hook to be the GuestDefinition sidecar, got %+v", cr.Spec.LauncherHooks[1])
+	}
+
+	if cr.Spec.LauncherHooks[2].Sidecar == nil || !slices.Contains(cr.Spec.LauncherHooks[2].Sidecar.PermittedHooks, pluginv1alpha1.LauncherHookPreBoot) {
+		t.Fatalf("expected third hook to be the PreBoot sidecar, got %+v", cr.Spec.LauncherHooks[2])
+	}
+
+	if cr.Spec.LauncherHooks[3].CEL == nil || cr.Spec.LauncherHooks[3].CEL.Expression != "Domain{Name: 'cel-last'}" {
+		t.Fatalf("expected fourth hook to be the last CEL hook, got %+v", cr.Spec.LauncherHooks[3])
+	}
+}
+
+func TestGeneratePluginCRCELHookPoint(t *testing.T) {
+	sourceDir := setupSourceDir(t)
+	outputDir := filepath.Join(t.TempDir(), "deploy")
+
+	p := New("test-plugin").WithLauncherHook(GuestDefinitionCEL("Domain{Name: 'test'}"))
+	if err := p.generate(outputDir, sourceDir); err != nil {
+		t.Fatal(err)
+	}
+
+	cr := readPluginCR(t, outputDir)
+
+	if len(cr.Spec.LauncherHooks) != 1 || cr.Spec.LauncherHooks[0].CEL == nil {
+		t.Fatal("expected 1 CEL launcher hook")
+	}
+
+	if cr.Spec.LauncherHooks[0].CEL.HookPoint != pluginv1alpha1.LauncherHookGuestDefinition {
+		t.Fatalf("expected CEL hookPoint GuestDefinition, got %q", cr.Spec.LauncherHooks[0].CEL.HookPoint)
+	}
+
+	if cr.Spec.LauncherHooks[0].CEL.Expression != "Domain{Name: 'test'}" {
+		t.Fatalf("expected expression, got %q", cr.Spec.LauncherHooks[0].CEL.Expression)
+	}
+
+	if cr.Spec.LauncherHooks[0].Sidecar != nil {
+		t.Fatal("expected no sidecar")
+	}
+
+	if cr.Spec.LauncherHooks[0].Timeout != nil {
+		t.Fatal("expected no timeout on a CEL hook")
+	}
+}
+
+func TestGeneratePluginCRSharedSocketPerEntrypoint(t *testing.T) {
+	sourceDir := setupSourceDir(t)
+	outputDir := filepath.Join(t.TempDir(), "deploy")
+
+	timeout := 30 * time.Second
+	p := New("test-plugin").
+		WithLauncherHook(GuestDefinition(&stubGuestDefinitionHandler{}).WithEntrypoint("ep-a")).
+		WithLauncherHook(PreBoot(&stubPreBootHandler{}).WithEntrypoint("ep-a").WithTimeout(timeout))
+	if err := p.generate(outputDir, sourceDir); err != nil {
+		t.Fatal(err)
+	}
+
+	cr := readPluginCR(t, outputDir)
+
+	if len(cr.Spec.LauncherHooks) != 2 {
+		t.Fatalf("expected one entry per registered hook, got %d", len(cr.Spec.LauncherHooks))
+	}
+
+	if cr.Spec.LauncherHooks[0].Sidecar.SocketPath != cr.Spec.LauncherHooks[1].Sidecar.SocketPath {
+		t.Fatalf("expected hooks sharing an entrypoint to share a socket, got %q and %q", cr.Spec.LauncherHooks[0].Sidecar.SocketPath, cr.Spec.LauncherHooks[1].Sidecar.SocketPath)
+	}
+
+	if cr.Spec.LauncherHooks[0].Timeout != nil {
+		t.Fatal("expected no timeout on the hook without one")
+	}
+
+	if cr.Spec.LauncherHooks[1].Timeout == nil || cr.Spec.LauncherHooks[1].Timeout.Duration != timeout {
+		t.Fatalf("expected the per-hook timeout to be kept, got %v", cr.Spec.LauncherHooks[1].Timeout)
+	}
+}
+
+func TestGeneratePluginCRMutatingAdmissionPolicies(t *testing.T) {
+	sourceDir := setupSourceDir(t)
+	outputDir := filepath.Join(t.TempDir(), "deploy")
+
+	p := New("test-plugin").
+		WithLauncherHook(GuestDefinition(&stubGuestDefinitionHandler{})).
+		WithLauncherHook(PreBoot(&stubPreBootHandler{}).WithEntrypoint("ep-a")).
+		WithLauncherHook(GuestDefinitionCEL("Domain{Name: 'test'}"))
+	if err := p.generate(outputDir, sourceDir); err != nil {
+		t.Fatal(err)
+	}
+
+	cr := readPluginCR(t, outputDir)
+
+	if len(cr.Spec.MutatingAdmissionPolicies) != 2 {
+		t.Fatalf("expected 2 admission references, got %d", len(cr.Spec.MutatingAdmissionPolicies))
+	}
+
+	if cr.Spec.MutatingAdmissionPolicies[0].Name != "test-plugin" {
+		t.Fatalf("expected reference to the default MAP, got %q", cr.Spec.MutatingAdmissionPolicies[0].Name)
+	}
+
+	if cr.Spec.MutatingAdmissionPolicies[1].Name != "test-plugin-ep-a" {
+		t.Fatalf("expected reference to the ep-a MAP, got %q", cr.Spec.MutatingAdmissionPolicies[1].Name)
 	}
 }
 
@@ -422,7 +721,7 @@ func TestGenerateDaemonSet(t *testing.T) {
 	sourceDir := setupSourceDir(t)
 	outputDir := filepath.Join(t.TempDir(), "deploy")
 
-	p := New("test-plugin").WithNodeHook(PreVMStart, NodeHandler(&stubNodeHandler{}))
+	p := New("test-plugin").WithNodeHook(NodeHookPreVMStart, NodeHandler(&stubNodeHandler{}))
 	if err := p.generate(outputDir, sourceDir); err != nil {
 		t.Fatal(err)
 	}
@@ -444,6 +743,10 @@ func TestGenerateDaemonSet(t *testing.T) {
 
 	if ds.Metadata.Labels["app"] != "test-plugin" {
 		t.Fatalf("expected label app=test-plugin, got %v", ds.Metadata.Labels)
+	}
+
+	if ds.Metadata.Namespace != "default" {
+		t.Fatalf("expected namespace default, got %q", ds.Metadata.Namespace)
 	}
 
 	if len(ds.Spec.Template.Spec.Containers) != 1 {
@@ -488,7 +791,7 @@ func TestGenerateRBACWhenRulesProvided(t *testing.T) {
 	}}
 
 	p := New("test-plugin").
-		WithNodeHook(PreVMStart, NodeHandler(&stubNodeHandler{})).
+		WithNodeHook(NodeHookPreVMStart, NodeHandler(&stubNodeHandler{})).
 		WithRBACRules(rules)
 	if err := p.generate(outputDir, sourceDir); err != nil {
 		t.Fatal(err)
@@ -512,6 +815,10 @@ func TestGenerateRBACWhenRulesProvided(t *testing.T) {
 
 	if sa.Metadata.Name != "test-plugin" {
 		t.Fatalf("expected SA name test-plugin, got %q", sa.Metadata.Name)
+	}
+
+	if sa.Metadata.Namespace != "default" {
+		t.Fatalf("expected SA namespace default, got %q", sa.Metadata.Namespace)
 	}
 
 	var cr testClusterRole
@@ -564,7 +871,7 @@ func TestGenerateRBACWithCustomNamespace(t *testing.T) {
 	}}
 
 	p := New("test-plugin").
-		WithNodeHook(PreVMStart, NodeHandler(&stubNodeHandler{})).
+		WithNodeHook(NodeHookPreVMStart, NodeHandler(&stubNodeHandler{})).
 		WithRBACRules(rules).
 		WithNamespace("kube-system")
 	if err := p.generate(outputDir, sourceDir); err != nil {
@@ -575,7 +882,7 @@ func TestGenerateRBACWithCustomNamespace(t *testing.T) {
 	content := readFileContent(t, rbacFile)
 	docs := splitYAMLDocuments(content)
 	if len(docs) != 3 {
-		t.Fatalf("expected 3 YAML documents, got %d", len(docs))
+		t.Fatalf("expected 3 YAML documents in rbac.yaml, got %d", len(docs))
 	}
 
 	var crb testClusterRoleBinding
@@ -585,6 +892,22 @@ func TestGenerateRBACWithCustomNamespace(t *testing.T) {
 
 	if crb.Subjects[0].Namespace != "kube-system" {
 		t.Fatalf("expected namespace kube-system, got %q", crb.Subjects[0].Namespace)
+	}
+
+	var sa testK8sResource
+	if err := yaml.Unmarshal([]byte(docs[0]), &sa); err != nil {
+		t.Fatalf("unmarshal ServiceAccount: %v", err)
+	}
+
+	if sa.Metadata.Namespace != "kube-system" {
+		t.Fatalf("expected SA namespace kube-system, got %q", sa.Metadata.Namespace)
+	}
+
+	var ds testDaemonSet
+	readAndUnmarshal(t, findGeneratedFile(t, outputDir, "daemonset.yaml"), &ds)
+
+	if ds.Metadata.Namespace != "kube-system" {
+		t.Fatalf("expected DaemonSet namespace kube-system, got %q", ds.Metadata.Namespace)
 	}
 }
 
@@ -600,7 +923,7 @@ func TestGenerateRBACWithResourceNames(t *testing.T) {
 	}}
 
 	p := New("test-plugin").
-		WithNodeHook(PreVMStart, NodeHandler(&stubNodeHandler{})).
+		WithNodeHook(NodeHookPreVMStart, NodeHandler(&stubNodeHandler{})).
 		WithRBACRules(rules)
 	if err := p.generate(outputDir, sourceDir); err != nil {
 		t.Fatal(err)
@@ -622,7 +945,7 @@ func TestGenerateNoRBACWhenNoRules(t *testing.T) {
 	sourceDir := setupSourceDir(t)
 	outputDir := filepath.Join(t.TempDir(), "deploy")
 
-	p := New("test-plugin").WithNodeHook(PreVMStart, NodeHandler(&stubNodeHandler{}))
+	p := New("test-plugin").WithNodeHook(NodeHookPreVMStart, NodeHandler(&stubNodeHandler{}))
 	if err := p.generate(outputDir, sourceDir); err != nil {
 		t.Fatal(err)
 	}
@@ -636,7 +959,7 @@ func TestGenerateMAP(t *testing.T) {
 	sourceDir := setupSourceDir(t)
 	outputDir := filepath.Join(t.TempDir(), "deploy")
 
-	p := New("test-plugin").WithDomainHook(ForLibvirt(&stubDomainHandler{}))
+	p := New("test-plugin").WithLauncherHook(GuestDefinition(&stubGuestDefinitionHandler{}))
 	if err := p.generate(outputDir, sourceDir); err != nil {
 		t.Fatal(err)
 	}
@@ -706,8 +1029,176 @@ func TestGenerateMAP(t *testing.T) {
 		t.Fatalf("expected JSONPatch expression to contain mountPath, got:\n%s", expr)
 	}
 
+	if !strings.Contains(expr, `subPath: "test-plugin"`) {
+		t.Fatalf("expected JSONPatch expression to contain subPath, got:\n%s", expr)
+	}
+
 	if !strings.Contains(expr, `args: ["--entrypoint", "test-plugin", "--role", "sidecar"]`) {
 		t.Fatalf("expected JSONPatch expression to pass sidecar args, got:\n%s", expr)
+	}
+
+	if strings.Contains(expr, "ephemeral-disks") {
+		t.Fatalf("expected no ephemeral-disks mount without a PreBoot hook, got:\n%s", expr)
+	}
+
+	mustParseCEL(t, expr)
+}
+
+func TestGenerateMAPSidecarSecurityContext(t *testing.T) {
+	sourceDir := setupSourceDir(t)
+	outputDir := filepath.Join(t.TempDir(), "deploy")
+
+	p := New("test-plugin").WithLauncherHook(GuestDefinition(&stubGuestDefinitionHandler{}))
+	if err := p.generate(outputDir, sourceDir); err != nil {
+		t.Fatal(err)
+	}
+
+	var m testMAP
+	readAndUnmarshal(t, findGeneratedFile(t, outputDir, "mutating-admission-policy.yaml"), &m)
+
+	expr := m.Spec.Mutations[0].JSONPatch.Expression
+	if !strings.Contains(expr, "runAsUser: 107") {
+		t.Fatalf("expected JSONPatch expression to run as the qemu uid, got:\n%s", expr)
+	}
+
+	if !strings.Contains(expr, "runAsGroup: 107") {
+		t.Fatalf("expected JSONPatch expression to run as the qemu gid, got:\n%s", expr)
+	}
+
+	if !strings.Contains(expr, "runAsNonRoot: true") {
+		t.Fatalf("expected JSONPatch expression to keep runAsNonRoot, got:\n%s", expr)
+	}
+
+	if strings.Contains(expr, "imagePullPolicy") {
+		t.Fatalf("expected no imagePullPolicy when none is set, got:\n%s", expr)
+	}
+
+	if strings.Contains(expr, "resources:") {
+		t.Fatalf("expected no resources when none are set, got:\n%s", expr)
+	}
+
+	mustParseCEL(t, expr)
+}
+
+func TestGenerateMAPWithImagePullPolicy(t *testing.T) {
+	sourceDir := setupSourceDir(t)
+	outputDir := filepath.Join(t.TempDir(), "deploy")
+
+	p := New("test-plugin").
+		WithLauncherHook(GuestDefinition(&stubGuestDefinitionHandler{})).
+		WithImagePullPolicy("Always")
+	if err := p.generate(outputDir, sourceDir); err != nil {
+		t.Fatal(err)
+	}
+
+	var m testMAP
+	readAndUnmarshal(t, findGeneratedFile(t, outputDir, "mutating-admission-policy.yaml"), &m)
+
+	expr := m.Spec.Mutations[0].JSONPatch.Expression
+	if !strings.Contains(expr, `imagePullPolicy: "Always"`) {
+		t.Fatalf("expected JSONPatch expression to honor the image pull policy, got:\n%s", expr)
+	}
+
+	mustParseCEL(t, expr)
+}
+
+func TestGenerateMAPMountsEphemeralDisksForPreBoot(t *testing.T) {
+	sourceDir := setupSourceDir(t)
+	outputDir := filepath.Join(t.TempDir(), "deploy")
+
+	p := New("test-plugin").
+		WithLauncherHook(GuestDefinition(&stubGuestDefinitionHandler{})).
+		WithLauncherHook(PreBoot(&stubPreBootHandler{}).WithEntrypoint("ep-preboot"))
+	if err := p.generate(outputDir, sourceDir); err != nil {
+		t.Fatal(err)
+	}
+
+	var guestDefinitionMAP testMAP
+	readAndUnmarshal(t, findGeneratedFile(t, outputDir, "mutating-admission-policy.yaml"), &guestDefinitionMAP)
+	if strings.Contains(guestDefinitionMAP.Spec.Mutations[0].JSONPatch.Expression, "ephemeral-disks") {
+		t.Fatalf("expected no ephemeral-disks mount for the GuestDefinition entrypoint, got:\n%s", guestDefinitionMAP.Spec.Mutations[0].JSONPatch.Expression)
+	}
+
+	var preBootMAP testMAP
+	readAndUnmarshal(t, findGeneratedFile(t, outputDir, "ep-preboot-mutating-admission-policy.yaml"), &preBootMAP)
+	expr := preBootMAP.Spec.Mutations[0].JSONPatch.Expression
+	if !strings.Contains(expr, `name: "ephemeral-disks"`) {
+		t.Fatalf("expected the ephemeral-disks volume mount for the PreBoot entrypoint, got:\n%s", expr)
+	}
+
+	if !strings.Contains(expr, `mountPath: "/var/run/kubevirt-ephemeral-disks"`) {
+		t.Fatalf("expected the ephemeral-disks mount path for the PreBoot entrypoint, got:\n%s", expr)
+	}
+
+	mustParseCEL(t, expr)
+}
+
+func TestGenerateMAPWithSidecarPodLabels(t *testing.T) {
+	sourceDir := setupSourceDir(t)
+	outputDir := filepath.Join(t.TempDir(), "deploy")
+
+	p := New("test-plugin").
+		WithLauncherHook(GuestDefinition(&stubGuestDefinitionHandler{})).
+		WithSidecarPodLabels(map[string]string{"zeta": "1", "alpha": "2"})
+	if err := p.generate(outputDir, sourceDir); err != nil {
+		t.Fatal(err)
+	}
+
+	var m testMAP
+	readAndUnmarshal(t, findGeneratedFile(t, outputDir, "mutating-admission-policy.yaml"), &m)
+
+	if len(m.Spec.MatchConditions) != 4 {
+		t.Fatalf("expected 4 matchConditions, got %d: %+v", len(m.Spec.MatchConditions), m.Spec.MatchConditions)
+	}
+
+	conditions := map[string]string{}
+	for _, condition := range m.Spec.MatchConditions {
+		conditions[condition.Name] = condition.Expression
+	}
+
+	expectedAlpha := `has(object.metadata.labels) && "alpha" in object.metadata.labels && object.metadata.labels["alpha"] == "2"`
+	if conditions["has-target-label-0"] != expectedAlpha {
+		t.Fatalf("expected the first label matchCondition to gate on alpha, got %q", conditions["has-target-label-0"])
+	}
+
+	expectedZeta := `has(object.metadata.labels) && "zeta" in object.metadata.labels && object.metadata.labels["zeta"] == "1"`
+	if conditions["has-target-label-1"] != expectedZeta {
+		t.Fatalf("expected the second label matchCondition to gate on zeta, got %q", conditions["has-target-label-1"])
+	}
+
+	for _, condition := range m.Spec.MatchConditions[2:] {
+		mustParseCEL(t, condition.Expression)
+	}
+}
+
+func TestGenerateMAPWithSidecarResources(t *testing.T) {
+	sourceDir := setupSourceDir(t)
+	outputDir := filepath.Join(t.TempDir(), "deploy")
+
+	p := New("test-plugin").
+		WithLauncherHook(GuestDefinition(&stubGuestDefinitionHandler{})).
+		WithSidecarResources(corev1.ResourceRequirements{
+			Requests: corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("64Mi"), corev1.ResourceCPU: resource.MustParse("50m")},
+			Limits:   corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("500m")},
+		})
+	if err := p.generate(outputDir, sourceDir); err != nil {
+		t.Fatal(err)
+	}
+
+	var m testMAP
+	readAndUnmarshal(t, findGeneratedFile(t, outputDir, "mutating-admission-policy.yaml"), &m)
+
+	expr := m.Spec.Mutations[0].JSONPatch.Expression
+	if !strings.Contains(expr, "resources: Object.spec.containers.resources{") {
+		t.Fatalf("expected JSONPatch expression to render the resources, got:\n%s", expr)
+	}
+
+	if !strings.Contains(expr, `requests: {"cpu": "50m", "memory": "64Mi"}`) {
+		t.Fatalf("expected JSONPatch expression to render sorted requests, got:\n%s", expr)
+	}
+
+	if !strings.Contains(expr, `limits: {"cpu": "500m"}`) {
+		t.Fatalf("expected JSONPatch expression to render limits, got:\n%s", expr)
 	}
 
 	mustParseCEL(t, expr)
@@ -717,7 +1208,7 @@ func TestGenerateMAPBinding(t *testing.T) {
 	sourceDir := setupSourceDir(t)
 	outputDir := filepath.Join(t.TempDir(), "deploy")
 
-	p := New("test-plugin").WithDomainHook(ForLibvirt(&stubDomainHandler{}))
+	p := New("test-plugin").WithLauncherHook(GuestDefinition(&stubGuestDefinitionHandler{}))
 	if err := p.generate(outputDir, sourceDir); err != nil {
 		t.Fatal(err)
 	}
@@ -738,7 +1229,7 @@ func TestGenerateDockerfile(t *testing.T) {
 	sourceDir := setupSourceDir(t)
 	outputDir := filepath.Join(t.TempDir(), "deploy")
 
-	p := New("test-plugin").WithNodeHook(PreVMStart, NodeHandler(&stubNodeHandler{}))
+	p := New("test-plugin").WithNodeHook(NodeHookPreVMStart, NodeHandler(&stubNodeHandler{}))
 	if err := p.generate(outputDir, sourceDir); err != nil {
 		t.Fatal(err)
 	}
@@ -758,7 +1249,7 @@ func TestGenerateMakefile(t *testing.T) {
 	sourceDir := setupSourceDir(t)
 	outputDir := filepath.Join(t.TempDir(), "deploy")
 
-	p := New("test-plugin").WithNodeHook(PreVMStart, NodeHandler(&stubNodeHandler{}))
+	p := New("test-plugin").WithNodeHook(NodeHookPreVMStart, NodeHandler(&stubNodeHandler{}))
 	if err := p.generate(outputDir, sourceDir); err != nil {
 		t.Fatal(err)
 	}
@@ -815,7 +1306,7 @@ func TestGenerateCreatesOutputDir(t *testing.T) {
 	sourceDir := setupSourceDir(t)
 	outputDir := filepath.Join(t.TempDir(), "nested", "deploy")
 
-	p := New("test-plugin").WithNodeHook(PreVMStart, NodeHandler(&stubNodeHandler{}))
+	p := New("test-plugin").WithNodeHook(NodeHookPreVMStart, NodeHandler(&stubNodeHandler{}))
 	if err := p.generate(outputDir, sourceDir); err != nil {
 		t.Fatal(err)
 	}
@@ -845,8 +1336,8 @@ func TestGenerateFileNumbering(t *testing.T) {
 	}}
 
 	p := New("test-plugin").
-		WithDomainHook(ForLibvirt(&stubDomainHandler{})).
-		WithNodeHook(PreVMStart, NodeHandler(&stubNodeHandler{})).
+		WithLauncherHook(GuestDefinition(&stubGuestDefinitionHandler{})).
+		WithNodeHook(NodeHookPreVMStart, NodeHandler(&stubNodeHandler{})).
 		WithRBACRules(rules)
 	if err := p.generate(outputDir, sourceDir); err != nil {
 		t.Fatal(err)
@@ -935,7 +1426,7 @@ func TestGenerateRBACWithNonResourceURLs(t *testing.T) {
 	}}
 
 	p := New("test-plugin").
-		WithNodeHook(PreVMStart, NodeHandler(&stubNodeHandler{})).
+		WithNodeHook(NodeHookPreVMStart, NodeHandler(&stubNodeHandler{})).
 		WithRBACRules(rules)
 	if err := p.generate(outputDir, sourceDir); err != nil {
 		t.Fatal(err)
@@ -962,8 +1453,8 @@ func TestGenerateMultiEntrypointDaemonSets(t *testing.T) {
 	outputDir := filepath.Join(t.TempDir(), "deploy")
 
 	p := New("test-plugin").
-		WithNodeHook(PreVMStart, NodeHandler(&stubNodeHandler{}).WithEntrypoint("ep-a")).
-		WithNodeHook(PostVMStop, NodeHandler(&stubNodeHandler{}).WithEntrypoint("ep-b"))
+		WithNodeHook(NodeHookPreVMStart, NodeHandler(&stubNodeHandler{}).WithEntrypoint("ep-a")).
+		WithNodeHook(NodeHookPostVMStop, NodeHandler(&stubNodeHandler{}).WithEntrypoint("ep-b"))
 	if err := p.generate(outputDir, sourceDir); err != nil {
 		t.Fatal(err)
 	}
@@ -988,8 +1479,8 @@ func TestGenerateMultiEntrypointMAPs(t *testing.T) {
 	outputDir := filepath.Join(t.TempDir(), "deploy")
 
 	p := New("test-plugin").
-		WithDomainHook(ForLibvirt(&stubDomainHandler{}).WithEntrypoint("ep-a")).
-		WithDomainHook(ForLibvirt(&stubDomainHandler{}).WithEntrypoint("ep-b"))
+		WithLauncherHook(GuestDefinition(&stubGuestDefinitionHandler{}).WithEntrypoint("ep-a")).
+		WithLauncherHook(GuestDefinition(&stubGuestDefinitionHandler{}).WithEntrypoint("ep-b"))
 	if err := p.generate(outputDir, sourceDir); err != nil {
 		t.Fatal(err)
 	}
@@ -1028,34 +1519,33 @@ func TestGenerateMultiEntrypointPluginCR(t *testing.T) {
 	outputDir := filepath.Join(t.TempDir(), "deploy")
 
 	p := New("test-plugin").
-		WithDomainHook(ForLibvirt(&stubDomainHandler{}).WithEntrypoint("ep-a")).
-		WithDomainHook(ForLibvirt(&stubDomainHandler{}).WithEntrypoint("ep-b")).
-		WithNodeHook(PreVMStart, NodeHandler(&stubNodeHandler{}).WithEntrypoint("ep-a"))
+		WithLauncherHook(GuestDefinition(&stubGuestDefinitionHandler{}).WithEntrypoint("ep-a")).
+		WithLauncherHook(GuestDefinition(&stubGuestDefinitionHandler{}).WithEntrypoint("ep-b")).
+		WithNodeHook(NodeHookPreVMStart, NodeHandler(&stubNodeHandler{}).WithEntrypoint("ep-a"))
 	if err := p.generate(outputDir, sourceDir); err != nil {
 		t.Fatal(err)
 	}
 
-	var cr testPluginCR
-	readAndUnmarshal(t, findGeneratedFile(t, outputDir, "plugin.yaml"), &cr)
+	cr := readPluginCR(t, outputDir)
 
-	if cr.Metadata.Name != "test-plugin" {
-		t.Fatalf("expected single Plugin CR named 'test-plugin', got %q", cr.Metadata.Name)
+	if cr.Name != "test-plugin" {
+		t.Fatalf("expected single Plugin CR named 'test-plugin', got %q", cr.Name)
 	}
 
-	if len(cr.Spec.DomainHooks) != 2 {
-		t.Fatalf("expected 2 domainHooks in CR, got %d", len(cr.Spec.DomainHooks))
+	if len(cr.Spec.LauncherHooks) != 2 {
+		t.Fatalf("expected 2 launcher hooks in CR, got %d", len(cr.Spec.LauncherHooks))
 	}
 
 	if len(cr.Spec.NodeHooks) != 1 {
 		t.Fatalf("expected 1 nodeHook in CR, got %d", len(cr.Spec.NodeHooks))
 	}
 
-	if cr.Spec.DomainHooks[0].Sidecar.SocketPath != "/var/run/kubevirt-plugin/test-plugin/ep-a/domain.sock" {
-		t.Fatalf("expected ep-a socket path, got %q", cr.Spec.DomainHooks[0].Sidecar.SocketPath)
+	if cr.Spec.LauncherHooks[0].Sidecar.SocketPath != "/var/run/kubevirt-plugin/test-plugin/ep-a/launcher.sock" {
+		t.Fatalf("expected ep-a socket path, got %q", cr.Spec.LauncherHooks[0].Sidecar.SocketPath)
 	}
 
-	if cr.Spec.DomainHooks[1].Sidecar.SocketPath != "/var/run/kubevirt-plugin/test-plugin/ep-b/domain.sock" {
-		t.Fatalf("expected ep-b socket path, got %q", cr.Spec.DomainHooks[1].Sidecar.SocketPath)
+	if cr.Spec.LauncherHooks[1].Sidecar.SocketPath != "/var/run/kubevirt-plugin/test-plugin/ep-b/launcher.sock" {
+		t.Fatalf("expected ep-b socket path, got %q", cr.Spec.LauncherHooks[1].Sidecar.SocketPath)
 	}
 }
 
@@ -1064,7 +1554,7 @@ func TestGenerateDaemonSetContainerArgs(t *testing.T) {
 	outputDir := filepath.Join(t.TempDir(), "deploy")
 
 	p := New("test-plugin").
-		WithNodeHook(PreVMStart, NodeHandler(&stubNodeHandler{}).WithEntrypoint("ep-a"))
+		WithNodeHook(NodeHookPreVMStart, NodeHandler(&stubNodeHandler{}).WithEntrypoint("ep-a"))
 	if err := p.generate(outputDir, sourceDir); err != nil {
 		t.Fatal(err)
 	}
@@ -1089,7 +1579,7 @@ func TestGenerateMAPContainerArgs(t *testing.T) {
 	outputDir := filepath.Join(t.TempDir(), "deploy")
 
 	plugin := New("test-plugin").
-		WithDomainHook(ForLibvirt(&stubDomainHandler{}).WithEntrypoint("ep-a"))
+		WithLauncherHook(GuestDefinition(&stubGuestDefinitionHandler{}).WithEntrypoint("ep-a"))
 	if err := plugin.generate(outputDir, sourceDir); err != nil {
 		t.Fatal(err)
 	}
@@ -1106,6 +1596,10 @@ func TestGenerateMAPContainerArgs(t *testing.T) {
 		t.Fatalf("expected JSONPatch expression to keep the image entrypoint, got:\n%s", expr)
 	}
 
+	if !strings.Contains(expr, `subPath: "test-plugin"`) {
+		t.Fatalf("expected JSONPatch expression to mount the sockets volume with a subPath, got:\n%s", expr)
+	}
+
 	mustParseCEL(t, expr)
 }
 
@@ -1114,8 +1608,8 @@ func TestGenerateSingleEntrypointBackwardCompat(t *testing.T) {
 	outputDir := filepath.Join(t.TempDir(), "deploy")
 
 	p := New("test-plugin").
-		WithDomainHook(ForLibvirt(&stubDomainHandler{})).
-		WithNodeHook(PreVMStart, NodeHandler(&stubNodeHandler{}))
+		WithLauncherHook(GuestDefinition(&stubGuestDefinitionHandler{})).
+		WithNodeHook(NodeHookPreVMStart, NodeHandler(&stubNodeHandler{}))
 	if err := p.generate(outputDir, sourceDir); err != nil {
 		t.Fatal(err)
 	}
@@ -1150,7 +1644,7 @@ func TestGenerateDefaultEntrypointDaemonSetArgs(t *testing.T) {
 	sourceDir := setupSourceDir(t)
 	outputDir := filepath.Join(t.TempDir(), "deploy")
 
-	p := New("test-plugin").WithNodeHook(PreVMStart, NodeHandler(&stubNodeHandler{}))
+	p := New("test-plugin").WithNodeHook(NodeHookPreVMStart, NodeHandler(&stubNodeHandler{}))
 	if err := p.generate(outputDir, sourceDir); err != nil {
 		t.Fatal(err)
 	}
@@ -1165,98 +1659,17 @@ func TestGenerateDefaultEntrypointDaemonSetArgs(t *testing.T) {
 	}
 }
 
-func TestGenerateConflictingDomainHooksSameEntrypoint(t *testing.T) {
-	sourceDir := setupSourceDir(t)
-	outputDir := filepath.Join(t.TempDir(), "deploy")
-
-	t.Run("conflicting conditions", func(t *testing.T) {
-		p := New("test-plugin").
-			WithDomainHook(ForLibvirt(&stubDomainHandler{}).WithCondition("vmi.Name == 'a'")).
-			WithDomainHook(ForLibvirt(&stubDomainHandler{}).WithCondition("vmi.Name == 'b'"))
-		err := p.generate(outputDir, sourceDir)
-		if err == nil {
-			t.Fatal("expected error for conflicting conditions")
-		}
-		if !strings.Contains(err.Error(), "conflicting conditions") {
-			t.Fatalf("expected conflicting conditions error, got: %v", err)
-		}
-	})
-
-	t.Run("conflicting timeouts", func(t *testing.T) {
-		p := New("test-plugin").
-			WithDomainHook(ForLibvirt(&stubDomainHandler{}).WithTimeout(10 * time.Second)).
-			WithDomainHook(ForLibvirt(&stubDomainHandler{}).WithTimeout(30 * time.Second))
-		err := p.generate(outputDir, sourceDir)
-		if err == nil {
-			t.Fatal("expected error for conflicting timeouts")
-		}
-		if !strings.Contains(err.Error(), "conflicting timeouts") {
-			t.Fatalf("expected conflicting timeouts error, got: %v", err)
-		}
-	})
-
-	t.Run("conflicting failure strategies", func(t *testing.T) {
-		p := New("test-plugin").
-			WithDomainHook(ForLibvirt(&stubDomainHandler{}).WithFailureStrategy(Fail)).
-			WithDomainHook(ForLibvirt(&stubDomainHandler{}).WithFailureStrategy(Ignore))
-		err := p.generate(outputDir, sourceDir)
-		if err == nil {
-			t.Fatal("expected error for conflicting failure strategies")
-		}
-		if !strings.Contains(err.Error(), "conflicting failure strategies") {
-			t.Fatalf("expected conflicting failure strategies error, got: %v", err)
-		}
-	})
-
-	t.Run("one set one unset timeout", func(t *testing.T) {
-		p := New("test-plugin").
-			WithDomainHook(ForLibvirt(&stubDomainHandler{}).WithTimeout(10 * time.Second)).
-			WithDomainHook(ForLibvirt(&stubDomainHandler{}))
-		err := p.generate(outputDir, sourceDir)
-		if err == nil {
-			t.Fatal("expected error when one hook has timeout and another does not")
-		}
-		if !strings.Contains(err.Error(), "conflicting timeouts") {
-			t.Fatalf("expected conflicting timeouts error, got: %v", err)
-		}
-	})
-}
-
-func TestGenerateCollapsedDomainHooksSameEntrypoint(t *testing.T) {
-	sourceDir := setupSourceDir(t)
-	outputDir := filepath.Join(t.TempDir(), "deploy")
-
-	p := New("test-plugin").
-		WithDomainHook(ForLibvirt(&stubDomainHandler{})).
-		WithDomainHook(ForLibvirt(&stubDomainHandler{}))
-	if err := p.generate(outputDir, sourceDir); err != nil {
-		t.Fatal(err)
-	}
-
-	var cr testPluginCR
-	readAndUnmarshal(t, findGeneratedFile(t, outputDir, "plugin.yaml"), &cr)
-
-	if len(cr.Spec.DomainHooks) != 1 {
-		t.Fatalf("expected domain hooks with same entrypoint to be collapsed into 1 CR entry, got %d", len(cr.Spec.DomainHooks))
-	}
-
-	if cr.Spec.DomainHooks[0].Sidecar.SocketPath != "/var/run/kubevirt-plugin/test-plugin/domain.sock" {
-		t.Fatalf("expected default socket path, got %q", cr.Spec.DomainHooks[0].Sidecar.SocketPath)
-	}
-}
-
 func TestGenerateNodeSocketPathSubdirectory(t *testing.T) {
 	sourceDir := setupSourceDir(t)
 	outputDir := filepath.Join(t.TempDir(), "deploy")
 
 	p := New("test-plugin").
-		WithNodeHook(PreVMStart, NodeHandler(&stubNodeHandler{}).WithEntrypoint("ep-a"))
+		WithNodeHook(NodeHookPreVMStart, NodeHandler(&stubNodeHandler{}).WithEntrypoint("ep-a"))
 	if err := p.generate(outputDir, sourceDir); err != nil {
 		t.Fatal(err)
 	}
 
-	var cr testPluginCR
-	readAndUnmarshal(t, findGeneratedFile(t, outputDir, "plugin.yaml"), &cr)
+	cr := readPluginCR(t, outputDir)
 
 	expected := "/var/run/kubevirt/plugins/test-plugin/ep-a/node.sock"
 	if cr.Spec.NodeHooks[0].Socket != expected {
@@ -1264,111 +1677,83 @@ func TestGenerateNodeSocketPathSubdirectory(t *testing.T) {
 	}
 }
 
-func TestGeneratePluginCRCELDomainHookOnly(t *testing.T) {
+func TestGeneratePluginCRCELWithoutSidecars(t *testing.T) {
 	sourceDir := setupSourceDir(t)
 	outputDir := filepath.Join(t.TempDir(), "deploy")
 
-	p := New("test-plugin").WithDomainCELHook("Domain{Name: 'test'}")
+	p := New("test-plugin").WithLauncherHook(GuestDefinitionCEL("Domain{Name: 'test'}"))
 	if err := p.generate(outputDir, sourceDir); err != nil {
 		t.Fatal(err)
 	}
 
-	var cr testPluginCR
-	readAndUnmarshal(t, findGeneratedFile(t, outputDir, "plugin.yaml"), &cr)
+	cr := readPluginCR(t, outputDir)
 
-	if len(cr.Spec.DomainHooks) != 1 {
-		t.Fatalf("expected 1 domainHook, got %d", len(cr.Spec.DomainHooks))
+	if len(cr.Spec.LauncherHooks) != 1 {
+		t.Fatalf("expected 1 launcher hook, got %d", len(cr.Spec.LauncherHooks))
 	}
 
-	if cr.Spec.DomainHooks[0].CEL == nil {
-		t.Fatal("expected CEL domain hook")
+	if cr.Spec.LauncherHooks[0].CEL == nil {
+		t.Fatal("expected CEL launcher hook")
 	}
 
-	if cr.Spec.DomainHooks[0].CEL.Expression != "Domain{Name: 'test'}" {
-		t.Fatalf("expected expression, got %q", cr.Spec.DomainHooks[0].CEL.Expression)
+	if cr.Spec.LauncherHooks[0].CEL.Expression != "Domain{Name: 'test'}" {
+		t.Fatalf("expected expression, got %q", cr.Spec.LauncherHooks[0].CEL.Expression)
 	}
 
-	if cr.Spec.DomainHooks[0].Sidecar != nil {
+	if cr.Spec.LauncherHooks[0].Sidecar != nil {
 		t.Fatal("expected no sidecar")
 	}
+
+	if len(cr.Spec.MutatingAdmissionPolicies) != 0 {
+		t.Fatalf("expected no admission references without sidecars, got %v", cr.Spec.MutatingAdmissionPolicies)
+	}
 }
 
-func TestGenerateMultipleCELDomainHooks(t *testing.T) {
+func TestGenerateMultipleCELHooks(t *testing.T) {
 	sourceDir := setupSourceDir(t)
 	outputDir := filepath.Join(t.TempDir(), "deploy")
 
 	p := New("test-plugin").
-		WithDomainCELHook("Domain{Name: 'a'}").
-		WithDomainCELHook("Domain{Name: 'b'}")
+		WithLauncherHook(GuestDefinitionCEL("Domain{Name: 'a'}")).
+		WithLauncherHook(GuestDefinitionCEL("Domain{Name: 'b'}"))
 	if err := p.generate(outputDir, sourceDir); err != nil {
 		t.Fatal(err)
 	}
 
-	var cr testPluginCR
-	readAndUnmarshal(t, findGeneratedFile(t, outputDir, "plugin.yaml"), &cr)
+	cr := readPluginCR(t, outputDir)
 
-	if len(cr.Spec.DomainHooks) != 2 {
-		t.Fatalf("expected 2 domainHooks, got %d", len(cr.Spec.DomainHooks))
+	if len(cr.Spec.LauncherHooks) != 2 {
+		t.Fatalf("expected 2 launcher hooks, got %d", len(cr.Spec.LauncherHooks))
 	}
 
-	if cr.Spec.DomainHooks[0].CEL == nil || cr.Spec.DomainHooks[0].CEL.Expression != "Domain{Name: 'a'}" {
-		t.Fatalf("expected first CEL expression, got %+v", cr.Spec.DomainHooks[0])
+	if cr.Spec.LauncherHooks[0].CEL == nil || cr.Spec.LauncherHooks[0].CEL.Expression != "Domain{Name: 'a'}" {
+		t.Fatalf("expected first CEL expression, got %+v", cr.Spec.LauncherHooks[0])
 	}
 
-	if cr.Spec.DomainHooks[1].CEL == nil || cr.Spec.DomainHooks[1].CEL.Expression != "Domain{Name: 'b'}" {
-		t.Fatalf("expected second CEL expression, got %+v", cr.Spec.DomainHooks[1])
+	if cr.Spec.LauncherHooks[1].CEL == nil || cr.Spec.LauncherHooks[1].CEL.Expression != "Domain{Name: 'b'}" {
+		t.Fatalf("expected second CEL expression, got %+v", cr.Spec.LauncherHooks[1])
 	}
 }
 
-func TestGenerateCELFirstSidecarSecondOrder(t *testing.T) {
+func TestGenerateCELWithNodeHook(t *testing.T) {
 	sourceDir := setupSourceDir(t)
 	outputDir := filepath.Join(t.TempDir(), "deploy")
 
 	p := New("test-plugin").
-		WithDomainCELHook("Domain{Name: 'cel-first'}").
-		WithDomainHook(ForLibvirt(&stubDomainHandler{}))
+		WithLauncherHook(GuestDefinitionCEL("Domain{Name: 'test'}")).
+		WithNodeHook(NodeHookPreVMStart, NodeHandler(&stubNodeHandler{}))
 	if err := p.generate(outputDir, sourceDir); err != nil {
 		t.Fatal(err)
 	}
 
-	var cr testPluginCR
-	readAndUnmarshal(t, findGeneratedFile(t, outputDir, "plugin.yaml"), &cr)
+	cr := readPluginCR(t, outputDir)
 
-	if len(cr.Spec.DomainHooks) != 2 {
-		t.Fatalf("expected 2 domainHooks, got %d", len(cr.Spec.DomainHooks))
+	if len(cr.Spec.LauncherHooks) != 1 {
+		t.Fatalf("expected 1 launcher hook, got %d", len(cr.Spec.LauncherHooks))
 	}
 
-	// CEL should be first (declaration order)
-	if cr.Spec.DomainHooks[0].CEL == nil {
-		t.Fatal("expected first hook to be CEL (declaration order)")
-	}
-
-	// Sidecar should be second
-	if cr.Spec.DomainHooks[1].Sidecar == nil {
-		t.Fatal("expected second hook to be sidecar (declaration order)")
-	}
-}
-
-func TestGenerateCELDomainHookWithNodeHook(t *testing.T) {
-	sourceDir := setupSourceDir(t)
-	outputDir := filepath.Join(t.TempDir(), "deploy")
-
-	p := New("test-plugin").
-		WithDomainCELHook("Domain{Name: 'test'}").
-		WithNodeHook(PreVMStart, NodeHandler(&stubNodeHandler{}))
-	if err := p.generate(outputDir, sourceDir); err != nil {
-		t.Fatal(err)
-	}
-
-	var cr testPluginCR
-	readAndUnmarshal(t, findGeneratedFile(t, outputDir, "plugin.yaml"), &cr)
-
-	if len(cr.Spec.DomainHooks) != 1 {
-		t.Fatalf("expected 1 domainHook, got %d", len(cr.Spec.DomainHooks))
-	}
-
-	if cr.Spec.DomainHooks[0].CEL == nil {
-		t.Fatal("expected CEL domain hook")
+	if cr.Spec.LauncherHooks[0].CEL == nil {
+		t.Fatal("expected CEL launcher hook")
 	}
 
 	if len(cr.Spec.NodeHooks) != 1 {
@@ -1378,9 +1763,9 @@ func TestGenerateCELDomainHookWithNodeHook(t *testing.T) {
 	// DaemonSet should be generated (for node hook)
 	findGeneratedFile(t, outputDir, "daemonset.yaml")
 
-	// MAP should NOT be generated (no sidecar domain hooks)
+	// MAP should NOT be generated (no sidecar launcher hooks)
 	if generatedFileExists(outputDir, "mutating-admission-policy.yaml") {
-		t.Fatal("expected no MAP for CEL-only domain hooks")
+		t.Fatal("expected no MAP for CEL-only launcher hooks")
 	}
 
 	// Dockerfile should be generated (node hook needs container)
@@ -1393,7 +1778,7 @@ func TestGenerateCELOnlyNoDockerfile(t *testing.T) {
 	sourceDir := setupSourceDir(t)
 	outputDir := filepath.Join(t.TempDir(), "deploy")
 
-	p := New("test-plugin").WithDomainCELHook("Domain{Name: 'test'}")
+	p := New("test-plugin").WithLauncherHook(GuestDefinitionCEL("Domain{Name: 'test'}"))
 	if err := p.generate(outputDir, sourceDir); err != nil {
 		t.Fatal(err)
 	}
@@ -1411,7 +1796,7 @@ func TestGenerateCELOnlyNoMAP(t *testing.T) {
 	sourceDir := setupSourceDir(t)
 	outputDir := filepath.Join(t.TempDir(), "deploy")
 
-	p := New("test-plugin").WithDomainCELHook("Domain{Name: 'test'}")
+	p := New("test-plugin").WithLauncherHook(GuestDefinitionCEL("Domain{Name: 'test'}"))
 	if err := p.generate(outputDir, sourceDir); err != nil {
 		t.Fatal(err)
 	}
@@ -1430,29 +1815,28 @@ func TestGenerateMixedSidecarAndCEL(t *testing.T) {
 	outputDir := filepath.Join(t.TempDir(), "deploy")
 
 	p := New("test-plugin").
-		WithDomainHook(ForLibvirt(&stubDomainHandler{})).
-		WithDomainCELHook("Domain{Name: 'mutated'}")
+		WithLauncherHook(GuestDefinition(&stubGuestDefinitionHandler{})).
+		WithLauncherHook(GuestDefinitionCEL("Domain{Name: 'mutated'}"))
 	if err := p.generate(outputDir, sourceDir); err != nil {
 		t.Fatal(err)
 	}
 
-	var cr testPluginCR
-	readAndUnmarshal(t, findGeneratedFile(t, outputDir, "plugin.yaml"), &cr)
+	cr := readPluginCR(t, outputDir)
 
-	if len(cr.Spec.DomainHooks) != 2 {
-		t.Fatalf("expected 2 domainHooks, got %d", len(cr.Spec.DomainHooks))
+	if len(cr.Spec.LauncherHooks) != 2 {
+		t.Fatalf("expected 2 launcher hooks, got %d", len(cr.Spec.LauncherHooks))
 	}
 
-	if cr.Spec.DomainHooks[0].Sidecar == nil {
+	if cr.Spec.LauncherHooks[0].Sidecar == nil {
 		t.Fatal("expected first hook to be sidecar")
 	}
 
-	if cr.Spec.DomainHooks[1].CEL == nil {
+	if cr.Spec.LauncherHooks[1].CEL == nil {
 		t.Fatal("expected second hook to be CEL")
 	}
 
-	if cr.Spec.DomainHooks[1].CEL.Expression != "Domain{Name: 'mutated'}" {
-		t.Fatalf("expected CEL expression, got %q", cr.Spec.DomainHooks[1].CEL.Expression)
+	if cr.Spec.LauncherHooks[1].CEL.Expression != "Domain{Name: 'mutated'}" {
+		t.Fatalf("expected CEL expression, got %q", cr.Spec.LauncherHooks[1].CEL.Expression)
 	}
 
 	// MAP should still be generated for the sidecar hook
@@ -1463,36 +1847,33 @@ func TestGenerateCELWithPerHookSettings(t *testing.T) {
 	sourceDir := setupSourceDir(t)
 	outputDir := filepath.Join(t.TempDir(), "deploy")
 
-	timeout := 30 * time.Second
-	p := New("test-plugin").WithDomainHook(
-		CELDomainHook("Domain{Name: 'test'}").
+	p := New("test-plugin").WithLauncherHook(
+		GuestDefinitionCEL("Domain{Name: 'test'}").
 			WithCondition("vmi.Name == 'my-vmi'").
-			WithFailureStrategy(Ignore).
-			WithTimeout(timeout),
+			WithFailureStrategy(Ignore),
 	)
 	if err := p.generate(outputDir, sourceDir); err != nil {
 		t.Fatal(err)
 	}
 
-	var cr testPluginCR
-	readAndUnmarshal(t, findGeneratedFile(t, outputDir, "plugin.yaml"), &cr)
+	cr := readPluginCR(t, outputDir)
 
-	if len(cr.Spec.DomainHooks) != 1 {
-		t.Fatalf("expected 1 domainHook, got %d", len(cr.Spec.DomainHooks))
+	if len(cr.Spec.LauncherHooks) != 1 {
+		t.Fatalf("expected 1 launcher hook, got %d", len(cr.Spec.LauncherHooks))
 	}
 
-	hook := cr.Spec.DomainHooks[0]
+	hook := cr.Spec.LauncherHooks[0]
 
 	if hook.Condition != "vmi.Name == 'my-vmi'" {
 		t.Fatalf("expected condition, got %q", hook.Condition)
 	}
 
-	if hook.FailureStrategy != "Ignore" {
+	if hook.FailureStrategy != pluginv1alpha1.FailureStrategyIgnore {
 		t.Fatalf("expected failureStrategy Ignore, got %q", hook.FailureStrategy)
 	}
 
-	if hook.Timeout != "30s" {
-		t.Fatalf("expected timeout 30s, got %q", hook.Timeout)
+	if hook.Timeout != nil {
+		t.Fatalf("expected no timeout on a CEL hook, got %v", hook.Timeout)
 	}
 }
 
@@ -1501,19 +1882,18 @@ func TestGenerateCELExpressionWithDoubleQuotes(t *testing.T) {
 	outputDir := filepath.Join(t.TempDir(), "deploy")
 
 	expr := `Domain{Title: "test"}`
-	p := New("test-plugin").WithDomainCELHook(expr)
+	p := New("test-plugin").WithLauncherHook(GuestDefinitionCEL(expr))
 	if err := p.generate(outputDir, sourceDir); err != nil {
 		t.Fatal(err)
 	}
 
-	content := readFileContent(t, findGeneratedFile(t, outputDir, "plugin.yaml"))
+	cr := readPluginCR(t, outputDir)
 
-	var cr testPluginCR
-	if err := yaml.Unmarshal([]byte(content), &cr); err != nil {
-		t.Fatalf("generated YAML with double-quoted expression is invalid: %v\nContent:\n%s", err, content)
+	if len(cr.Spec.LauncherHooks) != 1 || cr.Spec.LauncherHooks[0].CEL == nil {
+		t.Fatal("expected 1 CEL launcher hook")
 	}
 
-	if cr.Spec.DomainHooks[0].CEL.Expression != expr {
-		t.Fatalf("expected expression to round-trip, got %q", cr.Spec.DomainHooks[0].CEL.Expression)
+	if cr.Spec.LauncherHooks[0].CEL.Expression != expr {
+		t.Fatalf("expected expression to round-trip, got %q", cr.Spec.LauncherHooks[0].CEL.Expression)
 	}
 }

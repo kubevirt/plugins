@@ -7,7 +7,8 @@
 #
 # Tests are scoped to ./pkg/... on purpose: the suites under tests/ are
 # Ginkgo functional tests that need a live cluster and are run via the
-# functest target, not plain `go test`.
+# functest target, not plain `go test`. Vet, in contrast, covers ./... so
+# the functional test packages are compile-checked on every run.
 #
 # cluster-up, cluster-down, and cluster-sync run directly on the host: they
 # must talk to the host's own podman/docker to create cluster-node
@@ -23,10 +24,18 @@ else
 test:
 	go test ./pkg/...
 vet:
-	go vet ./pkg/...
+	go vet ./...
 endif
 
-.PHONY: test vet cluster-up cluster-down cluster-sync deploy-kubevirt build-test-plugins functest
+# update-proto and verify-proto run on the host like the cluster targets:
+# they only need bash, curl or git, and diff, not a Go toolchain.
+update-proto:
+	./hack/update-proto.sh
+
+verify-proto:
+	./hack/verify-proto.sh
+
+.PHONY: test vet update-proto verify-proto cluster-up cluster-down cluster-sync deploy-kubevirt build-test-plugins functest
 
 cluster-up:
 	./cluster/up.sh

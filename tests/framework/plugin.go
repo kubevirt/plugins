@@ -12,20 +12,18 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	v1 "kubevirt.io/api/core/v1"
-	"libvirt.org/go/libvirtxml"
 )
 
-type NoopDomainHandler struct{}
+type NoopGuestDefinitionHandler struct{}
 
-func (*NoopDomainHandler) MutateDomain(_ context.Context, _ *libvirtxml.Domain, _ *v1.VirtualMachineInstance) error {
+func (*NoopGuestDefinitionHandler) GuestDefinition(_ context.Context, _ *plugin.GuestDefinitionRequest) error {
 	return nil
 }
 
 type NoopNodeHandler struct{}
 
-func (*NoopNodeHandler) ExecuteNodeHook(_ context.Context, _ *plugin.NodeHookRequest) error {
-	return nil
+func (*NoopNodeHandler) ExecuteNodeHook(_ context.Context, _ *plugin.NodeHookRequest) (*plugin.NodeHookResponse, error) {
+	return nil, nil
 }
 
 func (f *Framework) DeployPlugin(p *plugin.Plugin, namespace string) {

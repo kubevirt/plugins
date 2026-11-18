@@ -1,22 +1,45 @@
 package plugin
 
 import (
-	"sort"
+	"slices"
 	"testing"
 )
 
-func TestAllHookPointsReturnsCopy(t *testing.T) {
-	first := AllHookPoints()
-	sort.Strings(first)
+func TestAllNodeHookPointsReturnsCopy(t *testing.T) {
+	first := AllNodeHookPoints()
+	slices.Sort(first)
 
 	first[0] = "MUTATED"
 
-	second := AllHookPoints()
-	sort.Strings(second)
+	second := AllNodeHookPoints()
+	slices.Sort(second)
 
 	for _, hookPoint := range second {
 		if hookPoint == "MUTATED" {
-			t.Fatal("AllHookPoints() returned the same backing array instead of a copy")
+			t.Fatal("AllNodeHookPoints() returned the same backing array instead of a copy")
+		}
+	}
+}
+
+func TestAllNodeHookPointsMatchesConstants(t *testing.T) {
+	expected := []NodeHookPoint{
+		NodeHookPreVMStart,
+		NodeHookPostVMStart,
+		NodeHookOnVMStop,
+		NodeHookPostVMStop,
+		NodeHookPreMigrationSource,
+		NodeHookPreMigrationTarget,
+		NodeHookPostMigrationTarget,
+	}
+
+	actual := AllNodeHookPoints()
+	if len(actual) != len(expected) {
+		t.Fatalf("expected %d node hook points, got %d", len(expected), len(actual))
+	}
+
+	for i, hookPoint := range expected {
+		if actual[i] != hookPoint {
+			t.Fatalf("node hook point %d: expected %q, got %q", i, hookPoint, actual[i])
 		}
 	}
 }

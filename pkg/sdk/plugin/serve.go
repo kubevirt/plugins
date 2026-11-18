@@ -11,34 +11,32 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime/debug"
 	"syscall"
 	"time"
 
 	pb "github.com/kubevirt/plugins/api/hooks/v1alpha1"
+	"github.com/kubevirt/plugins/pkg/sdk/migration"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	v1 "kubevirt.io/api/core/v1"
 	"libvirt.org/go/libvirtxml"
 )
 
-type contextKey string
-
-const invocationContextKey contextKey = "invocationContext"
-
-func InvocationContextFromContext(ctx context.Context) string {
-	val, _ := ctx.Value(invocationContextKey).(string)
-	return val
+type launcherHookAdapter struct {
+	guestDefinitionHandler    GuestDefinitionHandler
+	preBootHandler            PreBootHandler
+	preMigrationSourceHandler PreMigrationSourceHandler
 }
 
-type domainHookAdapter struct {
-	handler LibvirtDomainHookHandler
-}
+func (a *launcherHookAdapter) GuestDefinition(ctx context.Context, req *pb.GuestDefinitionRequest) (*pb.GuestDefinitionResponse, error) {
+	if a.guestDefinitionHandler == nil {
+		return nil, status.Errorf(codes.Unimplemented, "GuestDefinition is not implemented by this plugin")
+	}
 
-func (a *domainHookAdapter) MutateDomain(ctx context.Context, req *pb.MutateDomainRequest) (*pb.MutateDomainResponse, error) {
-	invCtx := req.GetSidecarContext().GetInvocationContext()
-	ctx = context.WithValue(ctx, invocationContextKey, invCtx)
-
-	if req.GetDomainType() != "libvirt" {
-		return &pb.MutateDomainResponse{Domain: req.GetDomain()}, nil
+	if req.GetDomainType() != domainTypeLibvirt {
+		return &pb.GuestDefinitionResponse{Domain: req.GetDomain()}, nil
 	}
 
 	var domain libvirtxml.Domain
@@ -51,8 +49,8 @@ func (a *domainHookAdapter) MutateDomain(ctx context.Context, req *pb.MutateDoma
 		return nil, fmt.Errorf("failed to unmarshal VMI: %w", err)
 	}
 
-	if err := a.handler.MutateDomain(ctx, &domain, &vmi); err != nil {
-		return nil, fmt.Errorf("domain hook handler failed: %w", err)
+	if err := a.guestDefinitionHandler.GuestDefinition(ctx, &GuestDefinitionRequest{Domain: &domain, VMI: &vmi, InvocationContext: InvocationContext(req.GetSidecarContext().GetInvocationContext())}); err != nil {
+		return nil, fmt.Errorf("guest definition handler failed: %w", err)
 	}
 
 	xmlStr, err := domain.Marshal()
@@ -60,17 +58,78 @@ func (a *domainHookAdapter) MutateDomain(ctx context.Context, req *pb.MutateDoma
 		return nil, fmt.Errorf("failed to marshal domain XML: %w", err)
 	}
 
-	return &pb.MutateDomainResponse{Domain: []byte(xmlStr)}, nil
+	return &pb.GuestDefinitionResponse{Domain: []byte(xmlStr)}, nil
+}
+
+func (a *launcherHookAdapter) PreBoot(ctx context.Context, req *pb.PreBootRequest) (*pb.PreBootResponse, error) {
+	if a.preBootHandler == nil {
+		return nil, status.Errorf(codes.Unimplemented, "PreBoot is not implemented by this plugin")
+	}
+
+	var vmi v1.VirtualMachineInstance
+	if err := json.Unmarshal(req.GetVmi(), &vmi); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal VMI: %w", err)
+	}
+
+	artifactPaths := make(map[string]string, len(req.GetPreBootContext().GetArtifactPaths()))
+	for key, path := range req.GetPreBootContext().GetArtifactPaths() {
+		artifactPaths[key] = path
+	}
+
+	if _, err := a.preBootHandler.PreBoot(ctx, &PreBootRequest{VMI: &vmi, ArtifactPaths: artifactPaths}); err != nil {
+		return nil, fmt.Errorf("pre boot handler failed: %w", err)
+	}
+
+	return &pb.PreBootResponse{}, nil
+}
+
+func (a *launcherHookAdapter) PreMigrationSource(ctx context.Context, req *pb.PreMigrationSourceRequest) (*pb.PreMigrationSourceResponse, error) {
+	if a.preMigrationSourceHandler == nil {
+		return nil, status.Errorf(codes.Unimplemented, "PreMigrationSource is not implemented by this plugin")
+	}
+
+	var vmi v1.VirtualMachineInstance
+	if err := json.Unmarshal(req.GetVmi(), &vmi); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal VMI: %w", err)
+	}
+
+	var libvirtConfig *LibvirtMigrationConfig
+	if req.GetLibvirt() != nil {
+		libvirtConfig = &LibvirtMigrationConfig{Flags: migration.Flags(req.GetLibvirt().GetFlags()), Params: req.GetLibvirt().GetParams()}
+		if libvirtConfig.Params == nil {
+			libvirtConfig.Params = &LibvirtDomainMigrateParameters{}
+		}
+	}
+
+	resp, err := a.preMigrationSourceHandler.PreMigrationSource(ctx, &PreMigrationSourceRequest{VMI: &vmi, Libvirt: libvirtConfig})
+	if err != nil {
+		return nil, fmt.Errorf("pre migration source handler failed: %w", err)
+	}
+	if resp == nil || resp.Libvirt == nil {
+		return &pb.PreMigrationSourceResponse{}, nil
+	}
+
+	overlap := resp.Libvirt.SetFlags & resp.Libvirt.ClearFlags
+	if overlap != 0 {
+		return nil, fmt.Errorf("invalid migration flag change: bits 0b%b are both set and cleared", overlap)
+	}
+
+	return &pb.PreMigrationSourceResponse{
+		MigrationConfig: &pb.PreMigrationSourceResponse_Libvirt{
+			Libvirt: &pb.LibvirtMigrationConfigChanges{SetFlags: uint64(resp.Libvirt.SetFlags), ClearFlags: uint64(resp.Libvirt.ClearFlags), Params: resp.Libvirt.Params},
+		},
+	}, nil
 }
 
 type nodeHookAdapter struct {
-	handlers map[string]NodeHookHandler
+	handlers map[NodeHookPoint]NodeHookHandler
 }
 
 func (a *nodeHookAdapter) ExecuteNodeHook(ctx context.Context, req *pb.ExecuteNodeHookRequest) (*pb.ExecuteNodeHookResponse, error) {
-	handler, ok := a.handlers[req.GetHookPoint()]
+	hookPoint := NodeHookPoint(req.GetHookPoint())
+	handler, ok := a.handlers[hookPoint]
 	if !ok {
-		return nil, fmt.Errorf("no handler registered for hook point %q", req.GetHookPoint())
+		return nil, status.Errorf(codes.Unimplemented, "no handler registered for hook point %q", hookPoint)
 	}
 
 	var vmi v1.VirtualMachineInstance
@@ -79,35 +138,50 @@ func (a *nodeHookAdapter) ExecuteNodeHook(ctx context.Context, req *pb.ExecuteNo
 	}
 
 	hookReq := &NodeHookRequest{
-		HookPoint: req.GetHookPoint(),
+		HookPoint: hookPoint,
 		VMI:       &vmi,
 		NodeName:  req.GetNodeContext().GetNodeName(),
 	}
 
-	if err := handler.ExecuteNodeHook(ctx, hookReq); err != nil {
+	if _, err := handler.ExecuteNodeHook(ctx, hookReq); err != nil {
 		return nil, fmt.Errorf("node hook handler failed: %w", err)
 	}
 
 	return &pb.ExecuteNodeHookResponse{}, nil
 }
 
+// recoverPanics turns a handler panic into a codes.Internal error instead of
+// crashing the server goroutine.
+func recoverPanics() grpc.UnaryServerInterceptor {
+	return func(ctx context.Context, req any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (_ any, err error) {
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("panic serving %s: %v\n%s", info.FullMethod, r, debug.Stack())
+				err = status.Errorf(codes.Internal, "plugin handler panicked")
+			}
+		}()
+		return handler(ctx, req)
+	}
+}
+
 const (
-	roleSidecar   = "sidecar"
-	roleDaemonSet = "daemonset"
+	roleSidecar       = "sidecar"
+	roleDaemonSet     = "daemonset"
+	domainTypeLibvirt = "libvirt"
 )
 
 type serveOption func(*serveOptions)
 
 type serveOptions struct {
-	domainSocketPath string
-	nodeSocketPath   string
-	stopCh           <-chan struct{}
-	entrypoint       string
-	role             string
+	launcherSocketPath string
+	nodeSocketPath     string
+	stopCh             <-chan struct{}
+	entrypoint         string
+	role               string
 }
 
-func withDomainSocketPath(path string) serveOption {
-	return func(options *serveOptions) { options.domainSocketPath = path }
+func withLauncherSocketPath(path string) serveOption {
+	return func(options *serveOptions) { options.launcherSocketPath = path }
 }
 
 func withNodeSocketPath(path string) serveOption {
@@ -126,27 +200,14 @@ func withRole(role string) serveOption {
 	return func(options *serveOptions) { options.role = role }
 }
 
-type chainedDomainHandler struct {
-	handlers []LibvirtDomainHookHandler
-}
-
-func (h *chainedDomainHandler) MutateDomain(ctx context.Context, domain *libvirtxml.Domain, vmi *v1.VirtualMachineInstance) error {
-	for _, handler := range h.handlers {
-		if err := handler.MutateDomain(ctx, domain, vmi); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func (p *Plugin) domainHooksForEntrypoint(entrypoint string) []DomainHookOption {
-	var result []DomainHookOption
-	for _, domainHook := range p.domainHooks {
-		if domainHook.isCEL() {
+func (p *Plugin) launcherHooksForEntrypoint(entrypoint string) []LauncherHookOption {
+	var result []LauncherHookOption
+	for _, launcherHook := range p.launcherHooks {
+		if launcherHook.isCEL() {
 			continue
 		}
-		if p.resolveEntrypoint(domainHook.entrypoint) == entrypoint {
-			result = append(result, domainHook)
+		if p.resolveEntrypoint(launcherHook.entrypoint) == entrypoint {
+			result = append(result, launcherHook)
 		}
 	}
 	return result
@@ -165,11 +226,11 @@ func (p *Plugin) nodeHooksForEntrypoint(entrypoint string) []NodeHookOption {
 func (p *Plugin) allEntrypoints() []string {
 	seen := map[string]bool{}
 	var entrypoints []string
-	for _, domainHook := range p.domainHooks {
-		if domainHook.isCEL() {
+	for _, launcherHook := range p.launcherHooks {
+		if launcherHook.isCEL() {
 			continue
 		}
-		entrypoint := p.resolveEntrypoint(domainHook.entrypoint)
+		entrypoint := p.resolveEntrypoint(launcherHook.entrypoint)
 		if !seen[entrypoint] {
 			seen[entrypoint] = true
 			entrypoints = append(entrypoints, entrypoint)
@@ -193,20 +254,20 @@ func (p *Plugin) Serve(opts ...serveOption) error {
 		opt(options)
 	}
 
-	var domainHooks []DomainHookOption
+	var launcherHooks []LauncherHookOption
 	var nodeHooks []NodeHookOption
 	var effectiveEntrypoint string
 
 	if options.entrypoint != "" {
 		effectiveEntrypoint = options.entrypoint
-		domainHooks = p.domainHooksForEntrypoint(effectiveEntrypoint)
+		launcherHooks = p.launcherHooksForEntrypoint(effectiveEntrypoint)
 		nodeHooks = p.nodeHooksForEntrypoint(effectiveEntrypoint)
 	} else {
 		allEntrypoints := p.allEntrypoints()
 		if len(allEntrypoints) == 0 {
-			hasCELOnly := len(p.domainHooks) > 0 && len(p.sidecarDomainHooks()) == 0 && len(p.nodeHooks) == 0
+			hasCELOnly := len(p.launcherHooks) > 0 && len(p.sidecarLauncherHooks()) == 0 && len(p.nodeHooks) == 0
 			if hasCELOnly {
-				return fmt.Errorf("plugin has only CEL domain hooks which are evaluated by kubevirt directly; Serve() is not needed")
+				return fmt.Errorf("plugin has only CEL launcher hooks which are evaluated by kubevirt directly; Serve() is not needed")
 			}
 			return fmt.Errorf("no hooks registered")
 		}
@@ -214,63 +275,66 @@ func (p *Plugin) Serve(opts ...serveOption) error {
 			return fmt.Errorf("multiple entrypoints found (%v); use --entrypoint to select one", allEntrypoints)
 		}
 		effectiveEntrypoint = allEntrypoints[0]
-		domainHooks = p.domainHooksForEntrypoint(effectiveEntrypoint)
+		launcherHooks = p.launcherHooksForEntrypoint(effectiveEntrypoint)
 		nodeHooks = p.nodeHooksForEntrypoint(effectiveEntrypoint)
 	}
 
 	switch options.role {
 	case roleSidecar:
-		if len(domainHooks) == 0 {
-			return fmt.Errorf("no domain hooks registered for entrypoint %q; nothing to serve with --role %s", effectiveEntrypoint, roleSidecar)
+		if len(launcherHooks) == 0 {
+			return fmt.Errorf("no launcher hooks registered for entrypoint %q; nothing to serve with --role %s", effectiveEntrypoint, roleSidecar)
 		}
 		nodeHooks = nil
 	case roleDaemonSet:
 		if len(nodeHooks) == 0 {
 			return fmt.Errorf("no node hooks registered for entrypoint %q; nothing to serve with --role %s", effectiveEntrypoint, roleDaemonSet)
 		}
-		domainHooks = nil
+		launcherHooks = nil
 	default:
-		if len(domainHooks) > 0 && len(nodeHooks) > 0 {
-			return fmt.Errorf("entrypoint %q has both domain and node hooks; use --role %s or --role %s to select which to serve", effectiveEntrypoint, roleSidecar, roleDaemonSet)
+		if len(launcherHooks) > 0 && len(nodeHooks) > 0 {
+			return fmt.Errorf("entrypoint %q has both launcher and node hooks; use --role %s or --role %s to select which to serve", effectiveEntrypoint, roleSidecar, roleDaemonSet)
 		}
 	}
 
-	if len(domainHooks) > 0 && options.domainSocketPath == "" {
-		options.domainSocketPath = DomainSocketPathForEntrypoint(p.name, effectiveEntrypoint)
+	if len(launcherHooks) > 0 && options.launcherSocketPath == "" {
+		options.launcherSocketPath = LauncherSocketPath(p.name, effectiveEntrypoint)
 	}
 	if len(nodeHooks) > 0 && options.nodeSocketPath == "" {
-		options.nodeSocketPath = NodeSocketPathForEntrypoint(p.name, effectiveEntrypoint)
+		options.nodeSocketPath = NodeSocketPath(p.name, effectiveEntrypoint)
 	}
 
 	errCh := make(chan error, 2)
 	var servers []*grpc.Server
 
-	if len(domainHooks) > 0 {
-		var handler LibvirtDomainHookHandler
-		if len(domainHooks) == 1 {
-			handler = domainHooks[0].handler
-		} else {
-			handlers := make([]LibvirtDomainHookHandler, len(domainHooks))
-			for i, domainHook := range domainHooks {
-				handlers[i] = domainHook.handler
+	if len(launcherHooks) > 0 {
+		adapter := &launcherHookAdapter{}
+		for _, launcherHook := range launcherHooks {
+			switch launcherHook.hookPoint {
+			case LauncherHookGuestDefinition:
+				adapter.guestDefinitionHandler = launcherHook.guestDefinitionHandler
+			case LauncherHookPreBoot:
+				adapter.preBootHandler = launcherHook.preBootHandler
+			case LauncherHookPreMigrationSource:
+				adapter.preMigrationSourceHandler = launcherHook.preMigrationSourceHandler
+			default:
+				panic(fmt.Sprintf("unknown launcher hook point %q", launcherHook.hookPoint))
 			}
-			handler = &chainedDomainHandler{handlers: handlers}
 		}
 
-		server := grpc.NewServer()
-		pb.RegisterDomainHookServiceServer(server, &domainHookAdapter{handler: handler})
+		server := grpc.NewServer(grpc.UnaryInterceptor(recoverPanics()))
+		pb.RegisterLauncherHookServiceServer(server, adapter)
 
-		listener, err := listenUnix(options.domainSocketPath)
+		listener, err := listenUnix(options.launcherSocketPath)
 		if err != nil {
-			return fmt.Errorf("domain hook socket: %w", err)
+			return fmt.Errorf("launcher hook socket: %w", err)
 		}
 		servers = append(servers, server)
 		go func() { errCh <- server.Serve(listener) }()
 	}
 
 	if len(nodeHooks) > 0 {
-		server := grpc.NewServer()
-		handlers := make(map[string]NodeHookHandler, len(nodeHooks))
+		server := grpc.NewServer(grpc.UnaryInterceptor(recoverPanics()))
+		handlers := make(map[NodeHookPoint]NodeHookHandler, len(nodeHooks))
 		for _, nodeHook := range nodeHooks {
 			handlers[nodeHook.hookPoint] = nodeHook.handler
 		}
@@ -319,6 +383,7 @@ func (p *Plugin) Serve(opts ...serveOption) error {
 		for _, server := range servers {
 			server.Stop()
 		}
+		<-done
 	}
 
 	return nil
@@ -328,6 +393,7 @@ func listenUnix(path string) (net.Listener, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
 		return nil, fmt.Errorf("failed to create socket directory: %w", err)
 	}
+	// The os.Remove error is intentionally ignored; it only clears a stale socket from a previous run.
 	os.Remove(path)
 	return net.Listen("unix", path)
 }
@@ -369,7 +435,7 @@ func (p *Plugin) Execute() {
 func parseServeArgs(args []string) ([]serveOption, error) {
 	flags := flag.NewFlagSet("serve", flag.ContinueOnError)
 	entrypoint := flags.String("entrypoint", "", "serve only the hooks of this entrypoint")
-	role := flags.String("role", "", fmt.Sprintf("serve only the domain hooks (%s) or only the node hooks (%s)", roleSidecar, roleDaemonSet))
+	role := flags.String("role", "", fmt.Sprintf("serve only the launcher hooks (%s) or only the node hooks (%s)", roleSidecar, roleDaemonSet))
 	if err := flags.Parse(args); err != nil {
 		return nil, err
 	}

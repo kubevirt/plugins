@@ -4,25 +4,26 @@ import (
 	"context"
 
 	"github.com/kubevirt/plugins/pkg/sdk/plugin"
-	v1 "kubevirt.io/api/core/v1"
-	"libvirt.org/go/libvirtxml"
 )
 
 type domainHook struct{}
 
-func (*domainHook) MutateDomain(_ context.Context, _ *libvirtxml.Domain, _ *v1.VirtualMachineInstance) error {
+func (*domainHook) GuestDefinition(_ context.Context, _ *plugin.GuestDefinitionRequest) error {
 	return nil
 }
 
 type nodeHook struct{}
 
-func (*nodeHook) ExecuteNodeHook(_ context.Context, _ *plugin.NodeHookRequest) error {
-	return nil
+func (*nodeHook) ExecuteNodeHook(_ context.Context, _ *plugin.NodeHookRequest) (*plugin.NodeHookResponse, error) {
+	return nil, nil
+}
+
+func newPlugin() *plugin.Plugin {
+	return plugin.New("test-mixed-hooks").
+		WithLauncherHook(plugin.GuestDefinition(&domainHook{})).
+		WithNodeHook(plugin.NodeHookPreVMStart, plugin.NodeHandler(&nodeHook{}))
 }
 
 func main() {
-	plugin.New("test-mixed-hooks").
-		WithDomainHook(plugin.ForLibvirt(&domainHook{})).
-		WithNodeHook(plugin.PreVMStart, plugin.NodeHandler(&nodeHook{})).
-		Execute()
+	newPlugin().Execute()
 }

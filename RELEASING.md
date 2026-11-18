@@ -58,8 +58,10 @@ On `release-X.Y` (or on `main` if the branch is not cut yet), once KubeVirt
    - The Go images in `hack/builder/Dockerfile` (tag and digest) and
      `Dockerfile.test-plugin` to the Go minor KubeVirt builds with
      (`GIMME_GO_VERSION` in KubeVirt's `hack/builder/Dockerfile`).
-2. Sync the hook API: check out the tag in `../kubevirt`, run
-   `hack/update-proto.sh` from the repository root, and commit any change.
+2. Sync the hook API: point `KUBEVIRT_PROTO_REF` in `hack/config.sh` at the
+   `vX.Y.Z` tag (it moves together with `kubevirt.io/api`), run
+   `make update-proto`, check with `make verify-proto`, and commit any
+   change.
 3. Set the `KUBEVIRT_VERSION` default in `hack/config.sh` to that tag.
 4. Point `cluster/kubevirtci_tag.txt` and `KUBEVIRT_PROVIDER`
    (`cluster/kubevirtci.sh`) at a kubevirtci provider that KubeVirt `vX.Y`

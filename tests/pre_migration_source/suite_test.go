@@ -1,4 +1,4 @@
-package cel_domain_hook_test
+package main
 
 import (
 	"testing"
@@ -9,9 +9,9 @@ import (
 	"github.com/kubevirt/plugins/tests/framework"
 )
 
-func TestCELDomainHook(t *testing.T) {
+func TestPreMigrationSource(t *testing.T) {
 	RegisterFailHandler(Fail)
-	RunSpecs(t, "CEL Domain Hook Suite")
+	RunSpecs(t, "Pre Migration Source Suite")
 }
 
 var _ = framework.SetupSuite()
