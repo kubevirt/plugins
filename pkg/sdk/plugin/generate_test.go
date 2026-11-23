@@ -955,6 +955,51 @@ func TestGenerateNoRBACWhenNoRules(t *testing.T) {
 	}
 }
 
+func TestGenerateNoDaemonSetForLauncherOnlyPlugin(t *testing.T) {
+	sourceDir := setupSourceDir(t)
+	outputDir := filepath.Join(t.TempDir(), "deploy")
+
+	rules := []rbacv1.PolicyRule{{
+		APIGroups: []string{""},
+		Resources: []string{"pods"},
+		Verbs:     []string{"get", "list"},
+	}}
+
+	p := New("test-plugin").
+		WithLauncherHook(GuestDefinition(&stubGuestDefinitionHandler{})).
+		WithRBACRules(rules)
+	if err := p.generate(outputDir, sourceDir); err != nil {
+		t.Fatal(err)
+	}
+
+	if generatedFileExists(outputDir, "daemonset.yaml") {
+		t.Fatalf("expected no daemonset.yaml for a launcher-only plugin, files: %v", listFileNames(outputDir))
+	}
+
+	// The RBAC rules only ever reach the node-hook DaemonSet service
+	// account, so WithRBACRules is ignored without node hooks.
+	if generatedFileExists(outputDir, "rbac.yaml") {
+		t.Fatalf("expected no rbac.yaml for a launcher-only plugin even with RBAC rules, files: %v", listFileNames(outputDir))
+	}
+
+	expectedYAML := []string{
+		"01-plugin.yaml",
+		"02-mutating-admission-policy.yaml",
+		"03-mutating-admission-policy-binding.yaml",
+	}
+
+	files := listFileNames(outputDir)
+	if len(files) != len(expectedYAML) {
+		t.Fatalf("expected %d YAML files in output dir, got %d: %v", len(expectedYAML), len(files), files)
+	}
+
+	for i, name := range expectedYAML {
+		if files[i] != name {
+			t.Fatalf("file %d: expected %q, got %q (all files: %v)", i, name, files[i], files)
+		}
+	}
+}
+
 func TestGenerateMAP(t *testing.T) {
 	sourceDir := setupSourceDir(t)
 	outputDir := filepath.Join(t.TempDir(), "deploy")
