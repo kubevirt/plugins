@@ -212,11 +212,7 @@ func (p *Plugin) generate(outputDir, sourceDir string) error {
 			if err != nil {
 				return err
 			}
-			suffix := "daemonset.yaml"
-			if entrypoint != p.name {
-				suffix = entrypoint + "-daemonset.yaml"
-			}
-			yamlFiles = append(yamlFiles, artifact{suffix, content})
+			yamlFiles = append(yamlFiles, artifact{p.fileSuffix(entrypoint, "daemonset.yaml"), content})
 		}
 	}
 
@@ -228,24 +224,17 @@ func (p *Plugin) generate(outputDir, sourceDir string) error {
 
 	if hasSidecarLauncher {
 		for _, entrypoint := range sidecarEntrypoints {
-			suffix := "mutating-admission-policy.yaml"
-			bindingSuffix := "mutating-admission-policy-binding.yaml"
-			if entrypoint != p.name {
-				suffix = entrypoint + "-mutating-admission-policy.yaml"
-				bindingSuffix = entrypoint + "-mutating-admission-policy-binding.yaml"
-			}
-
 			content, err = p.renderMAP(entrypoint)
 			if err != nil {
 				return err
 			}
-			yamlFiles = append(yamlFiles, artifact{suffix, content})
+			yamlFiles = append(yamlFiles, artifact{p.fileSuffix(entrypoint, "mutating-admission-policy.yaml"), content})
 
 			content, err = p.renderMAPBinding(entrypoint)
 			if err != nil {
 				return err
 			}
-			yamlFiles = append(yamlFiles, artifact{bindingSuffix, content})
+			yamlFiles = append(yamlFiles, artifact{p.fileSuffix(entrypoint, "mutating-admission-policy-binding.yaml"), content})
 		}
 	}
 
@@ -284,6 +273,16 @@ func (p *Plugin) generate(outputDir, sourceDir string) error {
 	}
 
 	return nil
+}
+
+// fileSuffix returns the generated-file suffix for one entrypoint's
+// artifacts: the default entrypoint keeps base, other entrypoints prefix it
+// so their files do not collide.
+func (p *Plugin) fileSuffix(entrypoint, base string) string {
+	if entrypoint == p.name {
+		return base
+	}
+	return entrypoint + "-" + base
 }
 
 func (p *Plugin) renderPluginCR() (string, error) {
@@ -368,7 +367,6 @@ func (p *Plugin) renderDaemonSet(entrypoint string) (string, error) {
 	data := struct {
 		Name               string
 		Namespace          string
-		PluginName         string
 		Image              string
 		ImagePullPolicy    string
 		ServiceAccountName string
@@ -377,10 +375,9 @@ func (p *Plugin) renderDaemonSet(entrypoint string) (string, error) {
 	}{
 		Name:               p.entrypointResourceName(entrypoint),
 		Namespace:          p.namespace,
-		PluginName:         p.name,
 		Image:              p.resolveImage(),
 		ImagePullPolicy:    p.imagePullPolicy,
-		Args:               p.daemonSetArgs(entrypoint),
+		Args:               []string{"--entrypoint", entrypoint, "--role", roleDaemonSet},
 		NodeSocketBasePath: nodeSocketBasePath,
 	}
 
@@ -391,22 +388,14 @@ func (p *Plugin) renderDaemonSet(entrypoint string) (string, error) {
 	return renderTemplate(daemonSetTmplStr, data)
 }
 
-func (p *Plugin) daemonSetArgs(entrypoint string) []string {
-	return []string{"--entrypoint", entrypoint, "--role", roleDaemonSet}
-}
-
 func (p *Plugin) renderRBAC() (string, error) {
-	namespace := p.namespace
-	if namespace == "" {
-		namespace = "default"
-	}
 	data := struct {
 		Name      string
 		Namespace string
 		Rules     []rbacv1.PolicyRule
 	}{
 		Name:      p.name,
-		Namespace: namespace,
+		Namespace: p.namespace,
 		Rules:     p.rbacRules,
 	}
 	return renderTemplate(rbacTmplStr, data)
@@ -436,7 +425,7 @@ func (p *Plugin) renderMAP(entrypoint string) (string, error) {
             volumeMounts: %s
         }
     }
-]'`, p.sidecarContainerName(entrypoint), p.resolveImage(), imagePullPolicyCEL(p.imagePullPolicy), celStringList(p.sidecarArgs(entrypoint)), resourcesCEL(p.sidecarResources), sidecarUID, sidecarGID, p.volumeMountsCEL(entrypoint))
+]'`, p.sidecarContainerName(entrypoint), p.resolveImage(), imagePullPolicyCEL(p.imagePullPolicy), quotedStringList([]string{"--entrypoint", entrypoint, "--role", roleSidecar}), resourcesCEL(p.sidecarResources), sidecarUID, sidecarGID, p.volumeMountsCEL(entrypoint))
 
 	data := struct {
 		Name                    string
@@ -536,11 +525,10 @@ func (p *Plugin) entrypointServesPreBoot(entrypoint string) bool {
 	return false
 }
 
-func (p *Plugin) sidecarArgs(entrypoint string) []string {
-	return []string{"--entrypoint", entrypoint, "--role", roleSidecar}
-}
-
-func celStringList(items []string) string {
+// quotedStringList renders items as a bracketed, double-quoted list.
+// strconv.Quote keeps both the CEL expressions and the YAML flow sequences
+// it feeds valid for quote-containing strings.
+func quotedStringList(items []string) string {
 	quoted := make([]string, len(items))
 	for i, item := range items {
 		quoted[i] = strconv.Quote(item)
@@ -552,31 +540,27 @@ func (p *Plugin) renderMAPBinding(entrypoint string) (string, error) {
 	return renderTemplate(mapBindingTmplStr, struct{ Name string }{p.entrypointResourceName(entrypoint)})
 }
 
-func collectUniqueEntrypoints[T any](hooks []T, getEntrypoint func(T) string) []string {
-	seen := map[string]bool{}
-	var entrypoints []string
-
-	for _, hook := range hooks {
-		entrypoint := getEntrypoint(hook)
-		if !seen[entrypoint] {
-			seen[entrypoint] = true
-			entrypoints = append(entrypoints, entrypoint)
-		}
+func appendUnique(list []string, s string) []string {
+	if !slices.Contains(list, s) {
+		list = append(list, s)
 	}
-
-	return entrypoints
+	return list
 }
 
 func (p *Plugin) uniqueNodeEntrypoints() []string {
-	return collectUniqueEntrypoints(p.nodeHooks, func(hook NodeHookOption) string {
-		return p.resolveEntrypoint(hook.entrypoint)
-	})
+	var entrypoints []string
+	for _, hook := range p.nodeHooks {
+		entrypoints = appendUnique(entrypoints, p.resolveEntrypoint(hook.entrypoint))
+	}
+	return entrypoints
 }
 
 func (p *Plugin) uniqueSidecarEntrypoints() []string {
-	return collectUniqueEntrypoints(p.sidecarLauncherHooks(), func(hook LauncherHookOption) string {
-		return p.resolveEntrypoint(hook.entrypoint)
-	})
+	var entrypoints []string
+	for _, hook := range p.sidecarLauncherHooks() {
+		entrypoints = appendUnique(entrypoints, p.resolveEntrypoint(hook.entrypoint))
+	}
+	return entrypoints
 }
 
 func (p *Plugin) sidecarLauncherHooks() []LauncherHookOption {
@@ -609,27 +593,16 @@ func readGoVersion(dir string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("read go.mod: %w", err)
 	}
-	for _, line := range strings.Split(string(data), "\n") {
-		line = strings.TrimSpace(line)
-		if strings.HasPrefix(line, "go ") {
-			return strings.TrimPrefix(line, "go "), nil
+	for line := range strings.SplitSeq(string(data), "\n") {
+		if goDirective, ok := strings.CutPrefix(strings.TrimSpace(line), "go "); ok {
+			return goDirective, nil
 		}
 	}
 	return "", fmt.Errorf("go version not found in go.mod")
 }
 
 func renderTemplate(tmplStr string, data any) (string, error) {
-	funcMap := template.FuncMap{
-		"yamlList": func(items []string) string {
-			quoted := make([]string, len(items))
-			for i, s := range items {
-				quoted[i] = `"` + s + `"`
-			}
-			return "[" + strings.Join(quoted, ", ") + "]"
-		},
-	}
-
-	t, err := template.New("").Funcs(funcMap).Parse(tmplStr)
+	t, err := template.New("").Funcs(template.FuncMap{"yamlList": quotedStringList}).Parse(tmplStr)
 	if err != nil {
 		return "", fmt.Errorf("parse template: %w", err)
 	}

@@ -1,6 +1,7 @@
 package plugin
 
 import (
+	"cmp"
 	"fmt"
 	"slices"
 	"strings"
@@ -63,7 +64,7 @@ func New(name string) *Plugin {
 	if name == "" {
 		panic("plugin name must not be empty")
 	}
-	validateName(name)
+	validateK8sName("plugin name", name)
 	return &Plugin{name: name, namespace: "default"}
 }
 
@@ -309,10 +310,6 @@ func (o *NodeHookOption) WithEntrypoint(name string) *NodeHookOption {
 	return o
 }
 
-func validateName(name string) {
-	validateK8sName("plugin name", name)
-}
-
 func validateEntrypoint(name string) {
 	if name == "" {
 		return
@@ -412,10 +409,7 @@ func validateSocketPath(label, path string) {
 }
 
 func (p *Plugin) resolveEntrypoint(entrypoint string) string {
-	if entrypoint == "" {
-		return p.name
-	}
-	return entrypoint
+	return cmp.Or(entrypoint, p.name)
 }
 
 // entrypointResourceName returns the name of the per-entrypoint DaemonSet
@@ -435,8 +429,5 @@ func (p *Plugin) sidecarContainerName(entrypoint string) string {
 }
 
 func (p *Plugin) resolveImage() string {
-	if p.image != "" {
-		return p.image
-	}
-	return "quay.io/myorg/" + p.name + ":latest"
+	return cmp.Or(p.image, "quay.io/myorg/"+p.name+":latest")
 }

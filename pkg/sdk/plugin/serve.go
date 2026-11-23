@@ -7,6 +7,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"maps"
 	"net"
 	"os"
 	"os/signal"
@@ -71,10 +72,8 @@ func (a *launcherHookAdapter) PreBoot(ctx context.Context, req *pb.PreBootReques
 		return nil, fmt.Errorf("failed to unmarshal VMI: %w", err)
 	}
 
-	artifactPaths := make(map[string]string, len(req.GetPreBootContext().GetArtifactPaths()))
-	for key, path := range req.GetPreBootContext().GetArtifactPaths() {
-		artifactPaths[key] = path
-	}
+	artifactPaths := map[string]string{}
+	maps.Copy(artifactPaths, req.GetPreBootContext().GetArtifactPaths())
 
 	if _, err := a.preBootHandler.PreBoot(ctx, &PreBootRequest{VMI: &vmi, ArtifactPaths: artifactPaths}); err != nil {
 		return nil, fmt.Errorf("pre boot handler failed: %w", err)
@@ -202,24 +201,9 @@ func (p *Plugin) nodeHooksForEntrypoint(entrypoint string) []NodeHookOption {
 }
 
 func (p *Plugin) allEntrypoints() []string {
-	seen := map[string]bool{}
-	var entrypoints []string
-	for _, launcherHook := range p.launcherHooks {
-		if launcherHook.isCEL() {
-			continue
-		}
-		entrypoint := p.resolveEntrypoint(launcherHook.entrypoint)
-		if !seen[entrypoint] {
-			seen[entrypoint] = true
-			entrypoints = append(entrypoints, entrypoint)
-		}
-	}
-	for _, nodeHook := range p.nodeHooks {
-		entrypoint := p.resolveEntrypoint(nodeHook.entrypoint)
-		if !seen[entrypoint] {
-			seen[entrypoint] = true
-			entrypoints = append(entrypoints, entrypoint)
-		}
+	entrypoints := p.uniqueSidecarEntrypoints()
+	for _, entrypoint := range p.uniqueNodeEntrypoints() {
+		entrypoints = appendUnique(entrypoints, entrypoint)
 	}
 	return entrypoints
 }
@@ -231,19 +215,16 @@ func (p *Plugin) Serve() error {
 }
 
 func (p *Plugin) serve(options serveOptions) error {
-	var launcherHooks []LauncherHookOption
-	var nodeHooks []NodeHookOption
 	var effectiveEntrypoint string
 
 	if options.entrypoint != "" {
 		effectiveEntrypoint = options.entrypoint
-		launcherHooks = p.launcherHooksForEntrypoint(effectiveEntrypoint)
-		nodeHooks = p.nodeHooksForEntrypoint(effectiveEntrypoint)
 	} else {
 		allEntrypoints := p.allEntrypoints()
 		if len(allEntrypoints) == 0 {
-			hasCELOnly := len(p.launcherHooks) > 0 && len(p.sidecarLauncherHooks()) == 0 && len(p.nodeHooks) == 0
-			if hasCELOnly {
+			// An empty allEntrypoints already implies no sidecar launcher or
+			// node hooks, so any remaining launcher hooks are CEL-only.
+			if len(p.launcherHooks) > 0 {
 				return fmt.Errorf("plugin has only CEL launcher hooks which are evaluated by kubevirt directly; Serve() is not needed")
 			}
 			return fmt.Errorf("no hooks registered")
@@ -252,9 +233,9 @@ func (p *Plugin) serve(options serveOptions) error {
 			return fmt.Errorf("multiple entrypoints found (%v); use --entrypoint to select one", allEntrypoints)
 		}
 		effectiveEntrypoint = allEntrypoints[0]
-		launcherHooks = p.launcherHooksForEntrypoint(effectiveEntrypoint)
-		nodeHooks = p.nodeHooksForEntrypoint(effectiveEntrypoint)
 	}
+	launcherHooks := p.launcherHooksForEntrypoint(effectiveEntrypoint)
+	nodeHooks := p.nodeHooksForEntrypoint(effectiveEntrypoint)
 
 	switch options.role {
 	case roleSidecar:

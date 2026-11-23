@@ -1244,7 +1244,8 @@ func TestServeWithSidecarArgsServesOnlyLauncherHooks(t *testing.T) {
 				WithNodeHook(NodeHookPreVMStart, NodeHandler(&stubNodeHandler{}).WithEntrypoint(test.entrypoint))
 
 			stopCh := make(chan struct{})
-			errCh := serveWithArgs(t, plugin, plugin.sidecarArgs(plugin.resolveEntrypoint(test.entrypoint)), launcherSock, nodeSock, stopCh)
+			args := []string{"--entrypoint", plugin.resolveEntrypoint(test.entrypoint), "--role", roleSidecar}
+			errCh := serveWithArgs(t, plugin, args, launcherSock, nodeSock, stopCh)
 
 			waitForSocketWhileServing(t, launcherSock, errCh)
 
@@ -1273,7 +1274,8 @@ func TestServeWithDaemonSetArgsServesOnlyNodeHooks(t *testing.T) {
 				WithNodeHook(NodeHookPreVMStart, NodeHandler(&stubNodeHandler{}).WithEntrypoint(test.entrypoint))
 
 			stopCh := make(chan struct{})
-			errCh := serveWithArgs(t, plugin, plugin.daemonSetArgs(plugin.resolveEntrypoint(test.entrypoint)), launcherSock, nodeSock, stopCh)
+			args := []string{"--entrypoint", plugin.resolveEntrypoint(test.entrypoint), "--role", roleDaemonSet}
+			errCh := serveWithArgs(t, plugin, args, launcherSock, nodeSock, stopCh)
 
 			waitForSocketWhileServing(t, nodeSock, errCh)
 
@@ -1294,7 +1296,7 @@ func TestServeWithDefaultEntrypointArgsAlongsideNamedEntrypoint(t *testing.T) {
 		nodeSock := filepath.Join(t.TempDir(), "node.sock")
 
 		stopCh := make(chan struct{})
-		errCh := serveWithArgs(t, plugin, plugin.sidecarArgs("test-plugin"), launcherSock, nodeSock, stopCh)
+		errCh := serveWithArgs(t, plugin, []string{"--entrypoint", "test-plugin", "--role", roleSidecar}, launcherSock, nodeSock, stopCh)
 
 		waitForSocketWhileServing(t, launcherSock, errCh)
 
@@ -1307,7 +1309,7 @@ func TestServeWithDefaultEntrypointArgsAlongsideNamedEntrypoint(t *testing.T) {
 		nodeSock := filepath.Join(t.TempDir(), "node.sock")
 
 		stopCh := make(chan struct{})
-		errCh := serveWithArgs(t, plugin, plugin.daemonSetArgs("test-plugin"), launcherSock, nodeSock, stopCh)
+		errCh := serveWithArgs(t, plugin, []string{"--entrypoint", "test-plugin", "--role", roleDaemonSet}, launcherSock, nodeSock, stopCh)
 
 		waitForSocketWhileServing(t, nodeSock, errCh)
 
