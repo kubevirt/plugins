@@ -215,7 +215,7 @@ func (p *Plugin) WithImagePullPolicy(policy string) *Plugin {
 // virt-launcher pods carrying these labels. KubeVirt copies VMI labels to
 // the launcher pod, so labelling VMIs scopes the plugin to them; without it
 // the sidecar is injected into every virt-launcher pod while the Plugins
-// feature gate is on - see the README section on sidecar injection scope.
+// feature gate is on - see the README's "Scoping sidecar injection" section.
 // Plugins without sidecar hooks generate no injection policy, so the labels
 // are ignored for them.
 func (p *Plugin) WithSidecarPodLabels(labels map[string]string) *Plugin {
