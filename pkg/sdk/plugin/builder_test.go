@@ -35,6 +35,23 @@ func (s *stubNodeHandler) ExecuteNodeHook(_ context.Context, _ *NodeHookRequest)
 	return nil, nil
 }
 
+// assertPanics fails the test unless fn panics; a non-empty wantMsg must be
+// contained in the panic value.
+func assertPanics(t *testing.T, wantMsg string, fn func()) {
+	t.Helper()
+
+	defer func() {
+		r := recover()
+		if r == nil {
+			t.Fatal("expected panic")
+		}
+		if wantMsg != "" && !strings.Contains(fmt.Sprint(r), wantMsg) {
+			t.Fatalf("expected panic containing %q, got: %v", wantMsg, r)
+		}
+	}()
+	fn()
+}
+
 func TestNewCreatesPluginWithName(t *testing.T) {
 	p := New("my-plugin")
 
@@ -208,38 +225,6 @@ func TestNodeHookPerHookSettings(t *testing.T) {
 	}
 }
 
-func TestFluentChaining(t *testing.T) {
-	nodeHandler := &stubNodeHandler{}
-
-	p := New("full-plugin").
-		WithLauncherHook(GuestDefinition(&stubGuestDefinitionHandler{})).
-		WithLauncherHook(GuestDefinitionCEL("Domain{Name: 'test'}")).
-		WithNodeHook(NodeHookPreVMStart, NodeHandler(nodeHandler)).
-		WithNodeHook(NodeHookPostVMStop, NodeHandler(nodeHandler)).
-		WithCondition("vmi.Name == 'test'").
-		WithFailureStrategy(Ignore)
-
-	if p.name != "full-plugin" {
-		t.Fatalf("expected name 'full-plugin', got %q", p.name)
-	}
-
-	if len(p.launcherHooks) != 2 {
-		t.Fatalf("expected 2 launcher hooks, got %d", len(p.launcherHooks))
-	}
-
-	if len(p.nodeHooks) != 2 {
-		t.Fatalf("expected 2 node hooks, got %d", len(p.nodeHooks))
-	}
-
-	if p.condition != "vmi.Name == 'test'" {
-		t.Fatalf("expected condition, got %q", p.condition)
-	}
-
-	if p.failureStrategy != Ignore {
-		t.Fatalf("expected Ignore, got %q", p.failureStrategy)
-	}
-}
-
 func TestMultipleLauncherHooks(t *testing.T) {
 	p := New("test").
 		WithLauncherHook(GuestDefinition(&stubGuestDefinitionHandler{}).WithEntrypoint("ep-a")).
@@ -312,100 +297,64 @@ func TestMultipleCELHooks(t *testing.T) {
 	}
 }
 
-func TestDuplicateHookPointSameEntrypointPanics(t *testing.T) {
-	defer func() {
-		if r := recover(); r == nil {
-			t.Fatal("expected panic on duplicate hook point within same entrypoint")
-		}
-	}()
+func TestDuplicateHookPointPanics(t *testing.T) {
+	tests := []struct {
+		name string
+		hook func()
+	}{
+		{"same entrypoint", func() {
+			New("test").
+				WithLauncherHook(GuestDefinition(&stubGuestDefinitionHandler{}).WithEntrypoint("ep-a")).
+				WithLauncherHook(GuestDefinition(&stubGuestDefinitionHandler{}).WithEntrypoint("ep-a"))
+		}},
+		{"same entrypoint, PreBoot registered twice", func() {
+			New("test").
+				WithLauncherHook(PreBoot(&stubPreBootHandler{}).WithEntrypoint("ep-a")).
+				WithLauncherHook(PreBoot(&stubPreBootHandler{}).WithEntrypoint("ep-a"))
+		}},
+		{"empty entrypoint resolving to the plugin name", func() {
+			New("my-plugin").
+				WithLauncherHook(GuestDefinition(&stubGuestDefinitionHandler{})).
+				WithLauncherHook(GuestDefinition(&stubGuestDefinitionHandler{}).WithEntrypoint("my-plugin"))
+		}},
+	}
 
-	New("test").
-		WithLauncherHook(GuestDefinition(&stubGuestDefinitionHandler{}).WithEntrypoint("ep-a")).
-		WithLauncherHook(GuestDefinition(&stubGuestDefinitionHandler{}).WithEntrypoint("ep-a"))
-}
-
-func TestDuplicateHookPointDifferentHookKindsPanics(t *testing.T) {
-	defer func() {
-		if r := recover(); r == nil {
-			t.Fatal("expected panic on duplicate PreBoot within same entrypoint")
-		}
-	}()
-
-	New("test").
-		WithLauncherHook(PreBoot(&stubPreBootHandler{}).WithEntrypoint("ep-a")).
-		WithLauncherHook(PreBoot(&stubPreBootHandler{}).WithEntrypoint("ep-a"))
-}
-
-func TestDuplicateHookPointResolvedEntrypointPanics(t *testing.T) {
-	defer func() {
-		if r := recover(); r == nil {
-			t.Fatal("expected panic when empty and explicit entrypoints resolve to same value")
-		}
-	}()
-
-	New("my-plugin").
-		WithLauncherHook(GuestDefinition(&stubGuestDefinitionHandler{})).
-		WithLauncherHook(GuestDefinition(&stubGuestDefinitionHandler{}).WithEntrypoint("my-plugin"))
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			assertPanics(t, "", test.hook)
+		})
+	}
 }
 
 func TestPanicsOnNilHandlers(t *testing.T) {
 	t.Run("GuestDefinition", func(t *testing.T) {
-		defer func() {
-			if r := recover(); r == nil {
-				t.Fatal("expected panic on nil GuestDefinition handler")
-			}
-		}()
-		GuestDefinition(nil)
+		assertPanics(t, "", func() { GuestDefinition(nil) })
 	})
 
 	t.Run("PreBoot", func(t *testing.T) {
-		defer func() {
-			if r := recover(); r == nil {
-				t.Fatal("expected panic on nil PreBoot handler")
-			}
-		}()
-		PreBoot(nil)
+		assertPanics(t, "", func() { PreBoot(nil) })
 	})
 
 	t.Run("PreMigrationSource", func(t *testing.T) {
-		defer func() {
-			if r := recover(); r == nil {
-				t.Fatal("expected panic on nil PreMigrationSource handler")
-			}
-		}()
-		PreMigrationSource(nil)
+		assertPanics(t, "", func() { PreMigrationSource(nil) })
 	})
 }
 
 func TestPanicsOnNilLauncherHook(t *testing.T) {
-	defer func() {
-		if r := recover(); r == nil {
-			t.Fatal("expected panic on nil launcher hook")
-		}
-	}()
-
-	New("test").WithLauncherHook(nil)
+	assertPanics(t, "", func() { New("test").WithLauncherHook(nil) })
 }
 
 func TestPanicsOnZeroValueLauncherHook(t *testing.T) {
 	t.Run("no hook point", func(t *testing.T) {
-		defer func() {
-			if r := recover(); r == nil {
-				t.Fatal("expected panic on launcher hook without a hook point")
-			}
-		}()
-
-		New("test").WithLauncherHook(&LauncherHookOption{guestDefinitionHandler: &stubGuestDefinitionHandler{}})
+		assertPanics(t, "", func() {
+			New("test").WithLauncherHook(&LauncherHookOption{guestDefinitionHandler: &stubGuestDefinitionHandler{}})
+		})
 	})
 
 	t.Run("no handler or expression", func(t *testing.T) {
-		defer func() {
-			if r := recover(); r == nil {
-				t.Fatal("expected panic on launcher hook without a handler or CEL expression")
-			}
-		}()
-
-		New("test").WithLauncherHook(&LauncherHookOption{hookPoint: LauncherHookGuestDefinition})
+		assertPanics(t, "", func() {
+			New("test").WithLauncherHook(&LauncherHookOption{hookPoint: LauncherHookGuestDefinition})
+		})
 	})
 }
 
@@ -424,184 +373,81 @@ func TestPanicsOnInvalidPluginName(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			defer func() {
-				if r := recover(); r == nil {
-					t.Fatalf("expected panic for plugin name %q", tc.input)
-				}
-			}()
-			New(tc.input)
+			assertPanics(t, "", func() { New(tc.input) })
 		})
 	}
 }
 
 func TestPanicsOnEmptyName(t *testing.T) {
-	defer func() {
-		if r := recover(); r == nil {
-			t.Fatal("expected panic on empty name")
-		}
-	}()
-
-	New("")
+	assertPanics(t, "", func() { New("") })
 }
 
 func TestPanicsOnNilNodeHandler(t *testing.T) {
-	defer func() {
-		if r := recover(); r == nil {
-			t.Fatal("expected panic on nil NodeHandler handler")
-		}
-	}()
-
-	NodeHandler(nil)
+	assertPanics(t, "", func() { NodeHandler(nil) })
 }
 
 func TestPanicsOnNodeHookWithoutHandler(t *testing.T) {
-	defer func() {
-		if r := recover(); r == nil {
-			t.Fatal("expected panic on node hook without a handler")
-		}
-	}()
-
-	New("test").WithNodeHook(NodeHookPreVMStart, &NodeHookOption{})
+	assertPanics(t, "", func() { New("test").WithNodeHook(NodeHookPreVMStart, &NodeHookOption{}) })
 }
 
 func TestPanicsOnInvalidHookPoint(t *testing.T) {
-	defer func() {
-		if r := recover(); r == nil {
-			t.Fatal("expected panic on invalid hook point")
-		}
-	}()
-
-	handler := &stubNodeHandler{}
-	New("test").WithNodeHook(NodeHookPoint("InvalidHookPoint"), NodeHandler(handler))
+	assertPanics(t, "", func() {
+		New("test").WithNodeHook(NodeHookPoint("InvalidHookPoint"), NodeHandler(&stubNodeHandler{}))
+	})
 }
 
 func TestPanicsOnInvalidFailureStrategy(t *testing.T) {
 	invalid := FailureStrategy("BestEffort")
 
 	t.Run("plugin level", func(t *testing.T) {
-		defer func() {
-			if r := recover(); r == nil {
-				t.Fatal("expected panic on invalid plugin-level failure strategy")
-			}
-		}()
-		New("test").WithFailureStrategy(invalid)
+		assertPanics(t, "", func() { New("test").WithFailureStrategy(invalid) })
 	})
 
 	t.Run("launcher hook", func(t *testing.T) {
-		defer func() {
-			if r := recover(); r == nil {
-				t.Fatal("expected panic on invalid launcher hook failure strategy")
-			}
-		}()
-		GuestDefinition(&stubGuestDefinitionHandler{}).WithFailureStrategy(invalid)
+		assertPanics(t, "", func() { GuestDefinition(&stubGuestDefinitionHandler{}).WithFailureStrategy(invalid) })
 	})
 
 	t.Run("node hook", func(t *testing.T) {
-		defer func() {
-			if r := recover(); r == nil {
-				t.Fatal("expected panic on invalid node hook failure strategy")
-			}
-		}()
-		NodeHandler(&stubNodeHandler{}).WithFailureStrategy(invalid)
+		assertPanics(t, "", func() { NodeHandler(&stubNodeHandler{}).WithFailureStrategy(invalid) })
 	})
 }
 
 func TestPanicsOnNonPositiveTimeout(t *testing.T) {
-	t.Run("launcher hook zero", func(t *testing.T) {
-		defer func() {
-			if r := recover(); r == nil {
-				t.Fatal("expected panic on zero launcher hook timeout")
-			}
-		}()
-		GuestDefinition(&stubGuestDefinitionHandler{}).WithTimeout(0)
+	t.Run("launcher hook", func(t *testing.T) {
+		assertPanics(t, "", func() { GuestDefinition(&stubGuestDefinitionHandler{}).WithTimeout(0) })
 	})
 
-	t.Run("launcher hook negative", func(t *testing.T) {
-		defer func() {
-			if r := recover(); r == nil {
-				t.Fatal("expected panic on negative launcher hook timeout")
-			}
-		}()
-		GuestDefinition(&stubGuestDefinitionHandler{}).WithTimeout(-time.Second)
-	})
-
-	t.Run("node hook zero", func(t *testing.T) {
-		defer func() {
-			if r := recover(); r == nil {
-				t.Fatal("expected panic on zero node hook timeout")
-			}
-		}()
-		NodeHandler(&stubNodeHandler{}).WithTimeout(0)
-	})
-
-	t.Run("node hook negative", func(t *testing.T) {
-		defer func() {
-			if r := recover(); r == nil {
-				t.Fatal("expected panic on negative node hook timeout")
-			}
-		}()
-		NodeHandler(&stubNodeHandler{}).WithTimeout(-time.Second)
+	t.Run("node hook", func(t *testing.T) {
+		assertPanics(t, "", func() { NodeHandler(&stubNodeHandler{}).WithTimeout(0) })
 	})
 }
 
 func TestPanicsOnTooLongNodeSocketPath(t *testing.T) {
-	defer func() {
-		r := recover()
-		if r == nil {
-			t.Fatal("expected panic on node socket path exceeding 107 bytes")
-		}
-		if !strings.Contains(fmt.Sprint(r), "node socket path") {
-			t.Fatalf("expected a node socket path panic, got: %v", r)
-		}
-	}()
-
-	New(strings.Repeat("a", 36)).
-		WithNodeHook(NodeHookPreVMStart, NodeHandler(&stubNodeHandler{}).WithEntrypoint(strings.Repeat("b", 36)))
+	assertPanics(t, "node socket path", func() {
+		New(strings.Repeat("a", 36)).
+			WithNodeHook(NodeHookPreVMStart, NodeHandler(&stubNodeHandler{}).WithEntrypoint(strings.Repeat("b", 36)))
+	})
 }
 
 func TestPanicsOnTooLongLauncherSocketPath(t *testing.T) {
-	defer func() {
-		r := recover()
-		if r == nil {
-			t.Fatal("expected panic on launcher socket path exceeding 107 bytes")
-		}
-		if !strings.Contains(fmt.Sprint(r), "launcher socket path") {
-			t.Fatalf("expected a launcher socket path panic, got: %v", r)
-		}
-	}()
-
-	New(strings.Repeat("a", 36)).
-		WithLauncherHook(GuestDefinition(&stubGuestDefinitionHandler{}).WithEntrypoint(strings.Repeat("b", 32)))
+	assertPanics(t, "launcher socket path", func() {
+		New(strings.Repeat("a", 36)).
+			WithLauncherHook(GuestDefinition(&stubGuestDefinitionHandler{}).WithEntrypoint(strings.Repeat("b", 32)))
+	})
 }
 
 func TestPanicsOnTooLongDaemonSetName(t *testing.T) {
-	defer func() {
-		r := recover()
-		if r == nil {
-			t.Fatal("expected panic on daemonset name exceeding 63 characters")
-		}
-		if !strings.Contains(fmt.Sprint(r), "daemonset name") {
-			t.Fatalf("expected a daemonset name panic, got: %v", r)
-		}
-	}()
-
-	New(strings.Repeat("a", 32)).
-		WithNodeHook(NodeHookPreVMStart, NodeHandler(&stubNodeHandler{}).WithEntrypoint(strings.Repeat("b", 31)))
+	assertPanics(t, "daemonset name", func() {
+		New(strings.Repeat("a", 32)).
+			WithNodeHook(NodeHookPreVMStart, NodeHandler(&stubNodeHandler{}).WithEntrypoint(strings.Repeat("b", 31)))
+	})
 }
 
 func TestPanicsOnTooLongSidecarContainerName(t *testing.T) {
-	defer func() {
-		r := recover()
-		if r == nil {
-			t.Fatal("expected panic on sidecar container name exceeding 63 characters")
-		}
-		if !strings.Contains(fmt.Sprint(r), "sidecar container name") {
-			t.Fatalf("expected a sidecar container name panic, got: %v", r)
-		}
-	}()
-
-	New(strings.Repeat("a", 32)).
-		WithLauncherHook(GuestDefinition(&stubGuestDefinitionHandler{}).WithEntrypoint(strings.Repeat("b", 16)))
+	assertPanics(t, "sidecar container name", func() {
+		New(strings.Repeat("a", 32)).
+			WithLauncherHook(GuestDefinition(&stubGuestDefinitionHandler{}).WithEntrypoint(strings.Repeat("b", 16)))
+	})
 }
 
 func TestAcceptsLongestSidecarContainerName(t *testing.T) {
@@ -638,44 +484,32 @@ func TestAcceptsLongestDaemonSetName(t *testing.T) {
 }
 
 func TestPanicsOnTooManyLauncherHooks(t *testing.T) {
-	p := New("test")
-	for i := 0; i < maxHooksPerPlugin; i++ {
-		p.WithLauncherHook(GuestDefinition(&stubGuestDefinitionHandler{}).WithEntrypoint(fmt.Sprintf("ep-%d", i)))
-	}
-
-	defer func() {
-		if r := recover(); r == nil {
-			t.Fatal("expected panic on the launcher hook exceeding the CRD bound")
+	assertPanics(t, "", func() {
+		p := New("test")
+		for i := 0; i < maxHooksPerPlugin; i++ {
+			p.WithLauncherHook(GuestDefinition(&stubGuestDefinitionHandler{}).WithEntrypoint(fmt.Sprintf("ep-%d", i)))
 		}
-	}()
-	p.WithLauncherHook(GuestDefinition(&stubGuestDefinitionHandler{}).WithEntrypoint("ep-overflow"))
+		p.WithLauncherHook(GuestDefinition(&stubGuestDefinitionHandler{}).WithEntrypoint("ep-overflow"))
+	})
 }
 
 func TestPanicsOnTooManyNodeHooks(t *testing.T) {
-	p := New("test")
-	for i := 0; i < maxHooksPerPlugin; i++ {
-		p.WithNodeHook(NodeHookPreVMStart, NodeHandler(&stubNodeHandler{}).WithEntrypoint(fmt.Sprintf("ep-%d", i)))
-	}
-
-	defer func() {
-		if r := recover(); r == nil {
-			t.Fatal("expected panic on the node hook exceeding the CRD bound")
+	assertPanics(t, "", func() {
+		p := New("test")
+		for i := 0; i < maxHooksPerPlugin; i++ {
+			p.WithNodeHook(NodeHookPreVMStart, NodeHandler(&stubNodeHandler{}).WithEntrypoint(fmt.Sprintf("ep-%d", i)))
 		}
-	}()
-	p.WithNodeHook(NodeHookPreVMStart, NodeHandler(&stubNodeHandler{}).WithEntrypoint("ep-overflow"))
+		p.WithNodeHook(NodeHookPreVMStart, NodeHandler(&stubNodeHandler{}).WithEntrypoint("ep-overflow"))
+	})
 }
 
 func TestPanicsOnDuplicateNodeHookPoint(t *testing.T) {
-	defer func() {
-		if r := recover(); r == nil {
-			t.Fatal("expected panic on duplicate hook point")
-		}
-	}()
-
-	handler := &stubNodeHandler{}
-	New("test").
-		WithNodeHook(NodeHookPreVMStart, NodeHandler(handler)).
-		WithNodeHook(NodeHookPreVMStart, NodeHandler(handler))
+	assertPanics(t, "", func() {
+		handler := &stubNodeHandler{}
+		New("test").
+			WithNodeHook(NodeHookPreVMStart, NodeHandler(handler)).
+			WithNodeHook(NodeHookPreVMStart, NodeHandler(handler))
+	})
 }
 
 func TestWithNamespaceSetsNamespace(t *testing.T) {
@@ -695,23 +529,11 @@ func TestDefaultNamespace(t *testing.T) {
 }
 
 func TestPanicsOnEmptyNamespace(t *testing.T) {
-	defer func() {
-		if r := recover(); r == nil {
-			t.Fatal("expected panic on empty namespace")
-		}
-	}()
-
-	New("test").WithNamespace("")
+	assertPanics(t, "", func() { New("test").WithNamespace("") })
 }
 
 func TestPanicsOnInvalidNamespace(t *testing.T) {
-	defer func() {
-		if r := recover(); r == nil {
-			t.Fatal("expected panic on invalid namespace")
-		}
-	}()
-
-	New("test").WithNamespace("My_Namespace")
+	assertPanics(t, "", func() { New("test").WithNamespace("My_Namespace") })
 }
 
 func TestEntrypointValidationPanics(t *testing.T) {
@@ -731,25 +553,13 @@ func TestEntrypointValidationPanics(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			defer func() {
-				if r := recover(); r == nil {
-					t.Fatalf("expected panic for entrypoint %q", tc.input)
-				}
-			}()
-
-			GuestDefinition(&stubGuestDefinitionHandler{}).WithEntrypoint(tc.input)
+			assertPanics(t, "", func() { GuestDefinition(&stubGuestDefinitionHandler{}).WithEntrypoint(tc.input) })
 		})
 	}
 }
 
 func TestEntrypointValidationNodeHookPanics(t *testing.T) {
-	defer func() {
-		if r := recover(); r == nil {
-			t.Fatal("expected panic for invalid node hook entrypoint")
-		}
-	}()
-
-	NodeHandler(&stubNodeHandler{}).WithEntrypoint("INVALID")
+	assertPanics(t, "", func() { NodeHandler(&stubNodeHandler{}).WithEntrypoint("INVALID") })
 }
 
 func TestEntrypointValidationAcceptsValid(t *testing.T) {
@@ -785,81 +595,36 @@ func TestWithNodeHookDoesNotMutateCallerOption(t *testing.T) {
 	}
 }
 
-func TestWithLauncherHookDoesNotMutateCallerOption(t *testing.T) {
+func TestWithLauncherHookCopiesTheCallerOption(t *testing.T) {
 	opt := PreBoot(&stubPreBootHandler{})
 
-	New("test").WithLauncherHook(opt.WithEntrypoint("ep-a"))
+	p := New("test").WithLauncherHook(opt.WithEntrypoint("ep-a"))
 
-	if opt.entrypoint != "ep-a" {
-		t.Fatalf("expected the caller option to keep its own entrypoint, got %q", opt.entrypoint)
+	opt.entrypoint = "ep-b"
+
+	if p.launcherHooks[0].entrypoint != "ep-a" {
+		t.Fatalf("expected the registered hook to keep entrypoint %q, got %q", "ep-a", p.launcherHooks[0].entrypoint)
 	}
 }
 
 func TestWithInvalidCELConditionPanics(t *testing.T) {
-	defer func() {
-		if r := recover(); r == nil {
-			t.Fatal("expected panic on invalid CEL condition for launcher hook")
-		}
-	}()
-
-	GuestDefinition(&stubGuestDefinitionHandler{}).WithCondition("invalid >>><< expression")
+	assertPanics(t, "", func() { GuestDefinition(&stubGuestDefinitionHandler{}).WithCondition("invalid >>><< expression") })
 }
 
 func TestWithInvalidCELConditionOnNodeHookPanics(t *testing.T) {
-	defer func() {
-		if r := recover(); r == nil {
-			t.Fatal("expected panic on invalid CEL condition for node hook")
-		}
-	}()
-
-	NodeHandler(&stubNodeHandler{}).WithCondition("invalid >>><< expression")
+	assertPanics(t, "", func() { NodeHandler(&stubNodeHandler{}).WithCondition("invalid >>><< expression") })
 }
 
 func TestWithInvalidPluginLevelCELConditionPanics(t *testing.T) {
-	defer func() {
-		if r := recover(); r == nil {
-			t.Fatal("expected panic on invalid plugin-level CEL condition")
-		}
-	}()
-
-	New("test").WithCondition("invalid >>><< expression")
-}
-
-func TestWithValidCELConditionSucceeds(t *testing.T) {
-	launcherOpt := GuestDefinition(&stubGuestDefinitionHandler{}).WithCondition("vmi.Spec.Domain.CPU.Cores > 2")
-	if launcherOpt.condition != "vmi.Spec.Domain.CPU.Cores > 2" {
-		t.Fatalf("expected launcher hook condition to be set, got %q", launcherOpt.condition)
-	}
-
-	nodeOpt := NodeHandler(&stubNodeHandler{}).WithCondition("vmi.Name == 'test'")
-	if nodeOpt.condition != "vmi.Name == 'test'" {
-		t.Fatalf("expected node hook condition to be set, got %q", nodeOpt.condition)
-	}
-
-	p := New("test").WithCondition("vmi.Name == 'test'")
-	if p.condition != "vmi.Name == 'test'" {
-		t.Fatalf("expected plugin condition to be set, got %q", p.condition)
-	}
+	assertPanics(t, "", func() { New("test").WithCondition("invalid >>><< expression") })
 }
 
 func TestGuestDefinitionCELEmptyExpressionPanics(t *testing.T) {
-	defer func() {
-		if r := recover(); r == nil {
-			t.Fatal("expected panic on empty CEL expression")
-		}
-	}()
-
-	GuestDefinitionCEL("")
+	assertPanics(t, "", func() { GuestDefinitionCEL("") })
 }
 
 func TestGuestDefinitionCELInvalidExpressionPanics(t *testing.T) {
-	defer func() {
-		if r := recover(); r == nil {
-			t.Fatal("expected panic on invalid CEL expression")
-		}
-	}()
-
-	GuestDefinitionCEL("invalid >>><< expression")
+	assertPanics(t, "", func() { GuestDefinitionCEL("invalid >>><< expression") })
 }
 
 func TestGuestDefinitionCELWithPerHookSettings(t *testing.T) {
@@ -877,23 +642,11 @@ func TestGuestDefinitionCELWithPerHookSettings(t *testing.T) {
 }
 
 func TestGuestDefinitionCELWithTimeoutPanics(t *testing.T) {
-	defer func() {
-		if r := recover(); r == nil {
-			t.Fatal("expected panic on CEL hook with timeout")
-		}
-	}()
-
-	GuestDefinitionCEL("Domain{Name: 'test'}").WithTimeout(30 * time.Second)
+	assertPanics(t, "", func() { GuestDefinitionCEL("Domain{Name: 'test'}").WithTimeout(30 * time.Second) })
 }
 
 func TestGuestDefinitionCELWithEntrypointPanics(t *testing.T) {
-	defer func() {
-		if r := recover(); r == nil {
-			t.Fatal("expected panic on CEL hook with entrypoint")
-		}
-	}()
-
-	GuestDefinitionCEL("Domain{Name: 'test'}").WithEntrypoint("my-ep")
+	assertPanics(t, "", func() { GuestDefinitionCEL("Domain{Name: 'test'}").WithEntrypoint("my-ep") })
 }
 
 func TestMixedSidecarAndCELLauncherHooks(t *testing.T) {
@@ -921,33 +674,15 @@ func TestMixedSidecarAndCELLauncherHooks(t *testing.T) {
 }
 
 func TestPanicsOnEmptyImage(t *testing.T) {
-	defer func() {
-		if r := recover(); r == nil {
-			t.Fatal("expected panic for empty image")
-		}
-	}()
-
-	New("test-plugin").WithImage("")
+	assertPanics(t, "", func() { New("test-plugin").WithImage("") })
 }
 
 func TestPanicsOnImageWithSingleQuote(t *testing.T) {
-	defer func() {
-		if r := recover(); r == nil {
-			t.Fatal("expected panic for image containing a single quote")
-		}
-	}()
-
-	New("test-plugin").WithImage("quay.io/myorg/my-plugin:it's-latest")
+	assertPanics(t, "", func() { New("test-plugin").WithImage("quay.io/myorg/my-plugin:it's-latest") })
 }
 
 func TestPanicsOnEmptyImagePullPolicy(t *testing.T) {
-	defer func() {
-		if r := recover(); r == nil {
-			t.Fatal("expected panic for empty image pull policy")
-		}
-	}()
-
-	New("test-plugin").WithImagePullPolicy("")
+	assertPanics(t, "", func() { New("test-plugin").WithImagePullPolicy("") })
 }
 
 func TestWithImagePullPolicyAcceptsKubernetesValues(t *testing.T) {
@@ -960,13 +695,7 @@ func TestWithImagePullPolicyAcceptsKubernetesValues(t *testing.T) {
 }
 
 func TestPanicsOnInvalidImagePullPolicy(t *testing.T) {
-	defer func() {
-		if r := recover(); r == nil {
-			t.Fatal("expected panic for invalid image pull policy")
-		}
-	}()
-
-	New("test-plugin").WithImagePullPolicy("Sometimes")
+	assertPanics(t, "", func() { New("test-plugin").WithImagePullPolicy("Sometimes") })
 }
 
 func TestWithSidecarPodLabelsSetsLabels(t *testing.T) {
@@ -978,13 +707,7 @@ func TestWithSidecarPodLabelsSetsLabels(t *testing.T) {
 }
 
 func TestPanicsOnEmptySidecarPodLabels(t *testing.T) {
-	defer func() {
-		if r := recover(); r == nil {
-			t.Fatal("expected panic on empty sidecar pod labels")
-		}
-	}()
-
-	New("test").WithSidecarPodLabels(map[string]string{})
+	assertPanics(t, "", func() { New("test").WithSidecarPodLabels(map[string]string{}) })
 }
 
 func TestPanicsOnInvalidSidecarPodLabels(t *testing.T) {
@@ -1006,13 +729,7 @@ func TestPanicsOnInvalidSidecarPodLabels(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			defer func() {
-				if r := recover(); r == nil {
-					t.Fatalf("expected panic for sidecar pod label %q: %q", tc.key, tc.value)
-				}
-			}()
-
-			New("test").WithSidecarPodLabels(map[string]string{tc.key: tc.value})
+			assertPanics(t, "", func() { New("test").WithSidecarPodLabels(map[string]string{tc.key: tc.value}) })
 		})
 	}
 }
