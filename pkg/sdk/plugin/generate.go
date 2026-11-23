@@ -150,9 +150,7 @@ COPY --from=builder /app/plugin /
 ENTRYPOINT ["/plugin", "serve"]
 `
 
-const makefileTmplStr = `REGISTRY ?= quay.io/myorg
-TAG ?= latest
-IMAGE = $(REGISTRY)/{{.Name}}:$(TAG)
+const makefileTmplStr = `IMAGE = {{ .Image }}
 
 CONTAINER_ENGINE ?= $(shell command -v podman 2>/dev/null || echo docker)
 GO_VERSION ?= {{ .GoVersion }}
@@ -262,8 +260,9 @@ func (p *Plugin) generate(outputDir, sourceDir string) error {
 
 		makefileContent, err := renderTemplate(makefileTmplStr, struct {
 			Name      string
+			Image     string
 			GoVersion string
-		}{p.name, goVersion})
+		}{p.name, p.resolveImage(), goVersion})
 		if err != nil {
 			return err
 		}
