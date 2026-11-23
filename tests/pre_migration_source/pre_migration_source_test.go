@@ -20,8 +20,7 @@ var _ = Describe("Pre Migration Source", func() {
 		requireTwoNodes()
 		ns := framework.TestContext.Namespace
 
-		p := newPlugin().WithNamespace(ns).WithImage(framework.TestContext.ContainerPrefix + "/pre_migration_source:latest")
-		framework.TestContext.DeployPlugin(p, ns)
+		framework.TestContext.DeploySuitePlugin(newPlugin(), ns, "pre_migration_source")
 
 		// A CPU limit keeps KubeVirt from configuring parallel migration
 		// itself, so the hook's parallel connection count is what libvirt
@@ -51,8 +50,7 @@ var _ = Describe("Pre Migration Source", func() {
 		requireTwoNodes()
 		ns := framework.TestContext.Namespace
 
-		p := newPlugin().WithNamespace(ns).WithImage(framework.TestContext.ContainerPrefix + "/pre_migration_source:latest")
-		framework.TestContext.DeployPlugin(p, ns)
+		framework.TestContext.DeploySuitePlugin(newPlugin(), ns, "pre_migration_source")
 
 		vmi := framework.TestContext.CreateVMI(ns, framework.WithLabels(map[string]string{"sdk-pms-fail": "true"}))
 		framework.TestContext.WaitForVMIRunning(ns, vmi.Name)

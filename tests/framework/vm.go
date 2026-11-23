@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -76,8 +77,7 @@ func WithCPULimit(limit string) VMIOption {
 // guest-console-log container whose logs expose it.
 func WithSerialConsoleLog() VMIOption {
 	return func(vmi *v1.VirtualMachineInstance) {
-		enabled := true
-		vmi.Spec.Domain.Devices.LogSerialConsole = &enabled
+		vmi.Spec.Domain.Devices.LogSerialConsole = new(true)
 	}
 }
 
@@ -208,6 +208,8 @@ func (f *Framework) WaitForVMIRunning(namespace, name string) {
 // own e2e tests. A non-root launcher runs libvirt in its session, which needs
 // an explicit URI; a root launcher uses the system URI virsh defaults to.
 func (f *Framework) LauncherDomainXML(namespace, vmiName string) string {
+	GinkgoHelper()
+
 	vmi := f.GetVMI(namespace, vmiName)
 	pod := f.GetLauncherPod(namespace, vmiName)
 

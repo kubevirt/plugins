@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Builds test plugin container images from tests/plugins/*/ and pushes them
-# to the kubevirtci cluster's local registry.
+# Builds test plugin container images from the tests/*/plugin.go suites and
+# pushes them to the kubevirtci cluster's local registry.
 set -e
 
 source hack/config.sh

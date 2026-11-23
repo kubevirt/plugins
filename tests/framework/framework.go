@@ -4,6 +4,7 @@ import (
 	"flag"
 	"os"
 	"path/filepath"
+	"testing"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -50,6 +51,13 @@ func SetupSuite() bool {
 	})
 
 	return true
+}
+
+// RunSuite runs a suite's ginkgo specs. SetupSuite must have run before it,
+// at package init time, so its flags register before flag parsing.
+func RunSuite(t *testing.T, name string) {
+	RegisterFailHandler(Fail)
+	RunSpecs(t, name)
 }
 
 func initialize(kubeconfig, kubectl, containerPrefix, artifactsDir string) {

@@ -11,8 +11,7 @@ var _ = Describe("Multi-Entrypoint Plugin", func() {
 	It("should apply every entrypoint's hook to the domain XML", func() {
 		ns := framework.TestContext.Namespace
 
-		p := newPlugin().WithNamespace(ns).WithImage(framework.TestContext.ContainerPrefix + "/multi_entrypoint:latest")
-		framework.TestContext.DeployPlugin(p, ns)
+		framework.TestContext.DeploySuitePlugin(newPlugin(), ns, "multi_entrypoint")
 
 		vmi := framework.TestContext.CreateVMI(ns)
 		framework.TestContext.WaitForVMIRunning(ns, vmi.Name)

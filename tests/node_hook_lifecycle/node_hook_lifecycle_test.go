@@ -16,8 +16,7 @@ var _ = Describe("Node Hook Lifecycle", func() {
 	It("should run node hooks across the VM lifecycle", func() {
 		ns := framework.TestContext.Namespace
 
-		p := newPlugin().WithNamespace(ns).WithImage(framework.TestContext.ContainerPrefix + "/node_hook_lifecycle:latest")
-		framework.TestContext.DeployPlugin(p, ns)
+		framework.TestContext.DeploySuitePlugin(newPlugin(), ns, "node_hook_lifecycle")
 		framework.TestContext.WaitForDaemonSetReady(ns, pluginName)
 
 		vmi := framework.TestContext.CreateVMI(ns)
