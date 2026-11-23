@@ -675,8 +675,8 @@ func TestGenerateDaemonSet(t *testing.T) {
 		t.Fatalf("expected container name test-plugin, got %q", container.Name)
 	}
 
-	if !strings.Contains(container.Image, "test-plugin") {
-		t.Fatalf("expected image to contain plugin name, got %q", container.Image)
+	if container.Image != "quay.io/myorg/test-plugin:latest" {
+		t.Fatalf("expected image quay.io/myorg/test-plugin:latest, got %q", container.Image)
 	}
 
 	if len(container.VolumeMounts) == 0 {
@@ -1254,6 +1254,27 @@ func TestBuilderGoVersion(t *testing.T) {
 	}
 }
 
+func TestGenerate(t *testing.T) {
+	// The public entrypoint uses the process working directory as the
+	// source dir: Dockerfile and Makefile land next to go.mod, manifests
+	// under the output dir.
+	t.Chdir(setupSourceDir(t))
+
+	p := New("test-plugin").WithNodeHook(NodeHookPreVMStart, NodeHandler(&stubNodeHandler{}))
+	if err := p.Generate("deploy"); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, name := range []string{"Dockerfile", "Makefile"} {
+		if _, err := os.Stat(name); os.IsNotExist(err) {
+			t.Fatalf("expected %s in the working directory", name)
+		}
+	}
+
+	findGeneratedFile(t, "deploy", "plugin.yaml")
+	findGeneratedFile(t, "deploy", "daemonset.yaml")
+}
+
 func TestGenerateCreatesOutputDir(t *testing.T) {
 	sourceDir := setupSourceDir(t)
 	outputDir := filepath.Join(t.TempDir(), "nested", "deploy")
@@ -1462,8 +1483,8 @@ func TestGenerateDaemonSetContainerArgs(t *testing.T) {
 		t.Fatalf("expected args %v, got %v", expectedArgs, container.Args)
 	}
 
-	if !strings.Contains(container.Image, "test-plugin") {
-		t.Fatalf("expected image to use plugin name, got %q", container.Image)
+	if container.Image != "quay.io/myorg/test-plugin:latest" {
+		t.Fatalf("expected image quay.io/myorg/test-plugin:latest, got %q", container.Image)
 	}
 }
 

@@ -710,6 +710,14 @@ func TestPanicsOnEmptySidecarPodLabels(t *testing.T) {
 	assertPanics(t, "", func() { New("test").WithSidecarPodLabels(map[string]string{}) })
 }
 
+func TestWithSidecarPodLabelsAcceptsEmptyValue(t *testing.T) {
+	p := New("test").WithSidecarPodLabels(map[string]string{"gate": ""})
+
+	if len(p.sidecarPodLabels) != 1 || p.sidecarPodLabels["gate"] != "" {
+		t.Fatalf("expected sidecar pod labels to be set, got %v", p.sidecarPodLabels)
+	}
+}
+
 func TestPanicsOnInvalidSidecarPodLabels(t *testing.T) {
 	cases := []struct {
 		name  string
@@ -725,6 +733,8 @@ func TestPanicsOnInvalidSidecarPodLabels(t *testing.T) {
 		{"value not ending with a letter or digit", "gate", "value-"},
 		{"key too long", strings.Repeat("a", 64), "value"},
 		{"value too long", "gate", strings.Repeat("a", 64)},
+		{"uppercase prefix", "Example.com/gate", "value"},
+		{"prefix too long", strings.Repeat("a", 254) + "/gate", "value"},
 	}
 
 	for _, tc := range cases {
