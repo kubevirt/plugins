@@ -1326,6 +1326,48 @@ func TestGenerateMakefile(t *testing.T) {
 	}
 }
 
+func TestGenerateMakefilePushesManifestImage(t *testing.T) {
+	tests := []struct {
+		name  string
+		image string
+	}{
+		{name: "default image"},
+		{name: "custom image", image: "example.com/myorg/test-plugin:v1.2.3"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			sourceDir := setupSourceDir(t)
+			outputDir := filepath.Join(t.TempDir(), "deploy")
+
+			p := New("test-plugin").
+				WithLauncherHook(GuestDefinition(&stubGuestDefinitionHandler{})).
+				WithNodeHook(NodeHookPreVMStart, NodeHandler(&stubNodeHandler{}))
+			if test.image != "" {
+				p = p.WithImage(test.image)
+			}
+			if err := p.generate(outputDir, sourceDir); err != nil {
+				t.Fatal(err)
+			}
+
+			var ds testDaemonSet
+			readAndUnmarshal(t, findGeneratedFile(t, outputDir, "daemonset.yaml"), &ds)
+			image := ds.Spec.Template.Spec.Containers[0].Image
+
+			mapContent := readFileContent(t, findGeneratedFile(t, outputDir, "mutating-admission-policy.yaml"))
+			if !strings.Contains(mapContent, "image: \""+image+"\"") {
+				t.Fatalf("expected MAP to reference image %q, got:\n%s", image, mapContent)
+			}
+
+			makefile := readFileContent(t, filepath.Join(sourceDir, "Makefile"))
+			expected := "IMAGE = " + image
+			if !strings.Contains(makefile, expected) {
+				t.Fatalf("expected Makefile to push the manifest image via %q, got:\n%s", expected, makefile)
+			}
+		})
+	}
+}
+
 func TestBuilderGoVersion(t *testing.T) {
 	tests := []struct {
 		goDirective string
