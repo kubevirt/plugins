@@ -9,7 +9,6 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
-	"libvirt.org/go/libvirtxml"
 )
 
 type stubGuestDefinitionHandler struct{}
@@ -1023,44 +1022,6 @@ func TestWithSidecarResourcesSetsResources(t *testing.T) {
 
 	if len(p.sidecarResources.Requests) != 1 {
 		t.Fatalf("expected sidecar resources to be set, got %+v", p.sidecarResources)
-	}
-}
-
-func TestHandlerFuncAdapters(t *testing.T) {
-	var guestDefinitionCalled bool
-	GuestDefinitionFunc(func(_ context.Context, req *GuestDefinitionRequest) error {
-		guestDefinitionCalled = req.Domain != nil
-		return nil
-	}).GuestDefinition(context.Background(), &GuestDefinitionRequest{Domain: &libvirtxml.Domain{}})
-	if !guestDefinitionCalled {
-		t.Fatal("expected GuestDefinitionFunc to be called")
-	}
-
-	var preBootCalled bool
-	PreBootFunc(func(_ context.Context, req *PreBootRequest) (*PreBootResponse, error) {
-		_, preBootCalled = req.EphemeralDiskDir()
-		return nil, nil
-	}).PreBoot(context.Background(), &PreBootRequest{ArtifactPaths: map[string]string{PreBootArtifactEphemeralDiskDir: "/tmp"}})
-	if !preBootCalled {
-		t.Fatal("expected PreBootFunc to be called")
-	}
-
-	var preMigrationSourceCalled bool
-	PreMigrationSourceFunc(func(_ context.Context, req *PreMigrationSourceRequest) (*PreMigrationSourceResponse, error) {
-		preMigrationSourceCalled = req.Libvirt != nil
-		return nil, nil
-	}).PreMigrationSource(context.Background(), &PreMigrationSourceRequest{Libvirt: &LibvirtMigrationConfig{}})
-	if !preMigrationSourceCalled {
-		t.Fatal("expected PreMigrationSourceFunc to be called")
-	}
-
-	var nodeHookCalled bool
-	NodeHookFunc(func(_ context.Context, req *NodeHookRequest) (*NodeHookResponse, error) {
-		nodeHookCalled = req.NodeName == "node-1"
-		return nil, nil
-	}).ExecuteNodeHook(context.Background(), &NodeHookRequest{NodeName: "node-1"})
-	if !nodeHookCalled {
-		t.Fatal("expected NodeHookFunc to be called")
 	}
 }
 

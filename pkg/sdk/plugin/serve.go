@@ -170,34 +170,12 @@ const (
 	domainTypeLibvirt = "libvirt"
 )
 
-type serveOption func(*serveOptions)
-
 type serveOptions struct {
 	launcherSocketPath string
 	nodeSocketPath     string
 	stopCh             <-chan struct{}
 	entrypoint         string
 	role               string
-}
-
-func withLauncherSocketPath(path string) serveOption {
-	return func(options *serveOptions) { options.launcherSocketPath = path }
-}
-
-func withNodeSocketPath(path string) serveOption {
-	return func(options *serveOptions) { options.nodeSocketPath = path }
-}
-
-func withStopCh(ch <-chan struct{}) serveOption {
-	return func(options *serveOptions) { options.stopCh = ch }
-}
-
-func withEntrypoint(entrypoint string) serveOption {
-	return func(options *serveOptions) { options.entrypoint = entrypoint }
-}
-
-func withRole(role string) serveOption {
-	return func(options *serveOptions) { options.role = role }
 }
 
 func (p *Plugin) launcherHooksForEntrypoint(entrypoint string) []LauncherHookOption {
@@ -247,13 +225,12 @@ func (p *Plugin) allEntrypoints() []string {
 }
 
 // Serve starts the gRPC servers for the registered hooks and blocks until
-// a signal or stop channel triggers shutdown.
-func (p *Plugin) Serve(opts ...serveOption) error {
-	options := &serveOptions{}
-	for _, opt := range opts {
-		opt(options)
-	}
+// SIGINT or SIGTERM triggers shutdown.
+func (p *Plugin) Serve() error {
+	return p.serve(serveOptions{})
+}
 
+func (p *Plugin) serve(options serveOptions) error {
 	var launcherHooks []LauncherHookOption
 	var nodeHooks []NodeHookOption
 	var effectiveEntrypoint string
@@ -415,7 +392,7 @@ func (p *Plugin) Execute() {
 		if err != nil {
 			log.Fatalf("serve failed: %v", err)
 		}
-		if err := p.Serve(serveOpts...); err != nil {
+		if err := p.serve(serveOpts); err != nil {
 			log.Fatalf("serve failed: %v", err)
 		}
 	case "generate":
@@ -432,21 +409,21 @@ func (p *Plugin) Execute() {
 	}
 }
 
-func parseServeArgs(args []string) ([]serveOption, error) {
+func parseServeArgs(args []string) (serveOptions, error) {
 	flags := flag.NewFlagSet("serve", flag.ContinueOnError)
 	entrypoint := flags.String("entrypoint", "", "serve only the hooks of this entrypoint")
 	role := flags.String("role", "", fmt.Sprintf("serve only the launcher hooks (%s) or only the node hooks (%s)", roleSidecar, roleDaemonSet))
 	if err := flags.Parse(args); err != nil {
-		return nil, err
+		return serveOptions{}, err
 	}
 
 	if flags.NArg() > 0 {
-		return nil, fmt.Errorf("unexpected arguments %v", flags.Args())
+		return serveOptions{}, fmt.Errorf("unexpected arguments %v", flags.Args())
 	}
 
 	if *role != "" && *role != roleSidecar && *role != roleDaemonSet {
-		return nil, fmt.Errorf("unknown role %q; must be %q or %q", *role, roleSidecar, roleDaemonSet)
+		return serveOptions{}, fmt.Errorf("unknown role %q; must be %q or %q", *role, roleSidecar, roleDaemonSet)
 	}
 
-	return []serveOption{withEntrypoint(*entrypoint), withRole(*role)}, nil
+	return serveOptions{entrypoint: *entrypoint, role: *role}, nil
 }

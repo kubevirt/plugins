@@ -381,7 +381,7 @@ func (p *Plugin) renderDaemonSet(entrypoint string) (string, error) {
 		Image:              p.resolveImage(),
 		ImagePullPolicy:    p.imagePullPolicy,
 		Args:               p.daemonSetArgs(entrypoint),
-		NodeSocketBasePath: NodeSocketBasePath,
+		NodeSocketBasePath: nodeSocketBasePath,
 	}
 
 	if len(p.rbacRules) > 0 {
@@ -436,7 +436,7 @@ func (p *Plugin) renderMAP(entrypoint string) (string, error) {
             volumeMounts: %s
         }
     }
-]'`, p.sidecarContainerName(entrypoint), p.resolveImage(), imagePullPolicyCEL(p.imagePullPolicy), celStringList(p.sidecarArgs(entrypoint)), resourcesCEL(p.sidecarResources), SidecarUID, SidecarGID, p.volumeMountsCEL(entrypoint))
+]'`, p.sidecarContainerName(entrypoint), p.resolveImage(), imagePullPolicyCEL(p.imagePullPolicy), celStringList(p.sidecarArgs(entrypoint)), resourcesCEL(p.sidecarResources), sidecarUID, sidecarGID, p.volumeMountsCEL(entrypoint))
 
 	data := struct {
 		Name                    string
@@ -445,7 +445,7 @@ func (p *Plugin) renderMAP(entrypoint string) (string, error) {
 		JSONPatchExpression     string
 	}{
 		Name:                    p.entrypointResourceName(entrypoint),
-		PluginSocketsVolumeName: PluginSocketsVolumeName,
+		PluginSocketsVolumeName: pluginSocketsVolumeName,
 		LabelConditions:         p.labelConditions(),
 		JSONPatchExpression:     jsonPatchExpr,
 	}
@@ -517,12 +517,12 @@ func (p *Plugin) volumeMountsCEL(entrypoint string) string {
                 name: %q,
                 mountPath: "/var/run/kubevirt-plugin/%s/",
                 subPath: %q
-            }`, PluginSocketsVolumeName, p.name, p.name)}
+            }`, pluginSocketsVolumeName, p.name, p.name)}
 	if p.entrypointServesPreBoot(entrypoint) {
 		mounts = append(mounts, fmt.Sprintf(`Object.spec.containers.volumeMounts{
                 name: %q,
                 mountPath: %q
-            }`, EphemeralDisksVolumeName, EphemeralDisksMountPath))
+            }`, ephemeralDisksVolumeName, ephemeralDisksMountPath))
 	}
 	return "[" + strings.Join(mounts, ", ") + "]"
 }

@@ -209,10 +209,13 @@ func serveWithArgs(t *testing.T, plugin *Plugin, args []string, launcherSock, no
 	if err != nil {
 		t.Fatalf("failed to parse serve args %v: %v", args, err)
 	}
+	serveOpts.launcherSocketPath = launcherSock
+	serveOpts.nodeSocketPath = nodeSock
+	serveOpts.stopCh = stopCh
 
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- plugin.Serve(append(serveOpts, withLauncherSocketPath(launcherSock), withNodeSocketPath(nodeSock), withStopCh(stopCh))...)
+		errCh <- plugin.serve(serveOpts)
 	}()
 
 	return errCh
@@ -636,7 +639,7 @@ func TestServeStartsAndStopsGracefully(t *testing.T) {
 	stopCh := make(chan struct{})
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- p.Serve(withLauncherSocketPath(launcherSock), withStopCh(stopCh))
+		errCh <- p.serve(serveOptions{launcherSocketPath: launcherSock, stopCh: stopCh})
 	}()
 
 	waitForSocket(t, launcherSock)
@@ -655,7 +658,7 @@ func TestServeRegistersLauncherHookAdapter(t *testing.T) {
 	stopCh := make(chan struct{})
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- p.Serve(withLauncherSocketPath(launcherSock), withStopCh(stopCh))
+		errCh <- p.serve(serveOptions{launcherSocketPath: launcherSock, stopCh: stopCh})
 	}()
 
 	waitForSocket(t, launcherSock)
@@ -701,7 +704,7 @@ func TestServeServesAllLauncherHookPointsOfAnEntrypoint(t *testing.T) {
 	stopCh := make(chan struct{})
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- p.Serve(withLauncherSocketPath(launcherSock), withStopCh(stopCh))
+		errCh <- p.serve(serveOptions{launcherSocketPath: launcherSock, stopCh: stopCh})
 	}()
 
 	waitForSocket(t, launcherSock)
@@ -746,7 +749,7 @@ func TestServePanicReturnsInternal(t *testing.T) {
 	stopCh := make(chan struct{})
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- p.Serve(withLauncherSocketPath(launcherSock), withStopCh(stopCh))
+		errCh <- p.serve(serveOptions{launcherSocketPath: launcherSock, stopCh: stopCh})
 	}()
 
 	waitForSocket(t, launcherSock)
@@ -791,7 +794,7 @@ func TestServeNodeHookPanicReturnsInternal(t *testing.T) {
 	stopCh := make(chan struct{})
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- p.Serve(withNodeSocketPath(nodeSock), withStopCh(stopCh))
+		errCh <- p.serve(serveOptions{nodeSocketPath: nodeSock, stopCh: stopCh})
 	}()
 
 	waitForSocket(t, nodeSock)
@@ -832,7 +835,7 @@ func TestServeRegistersNodeHookAdapter(t *testing.T) {
 	stopCh := make(chan struct{})
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- p.Serve(withNodeSocketPath(nodeSock), withStopCh(stopCh))
+		errCh <- p.serve(serveOptions{nodeSocketPath: nodeSock, stopCh: stopCh})
 	}()
 
 	waitForSocket(t, nodeSock)
@@ -1025,7 +1028,7 @@ func TestServeWithEntrypointFiltersLauncherHooks(t *testing.T) {
 	stopCh := make(chan struct{})
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- p.Serve(withLauncherSocketPath(launcherSock), withStopCh(stopCh), withEntrypoint("ep-a"))
+		errCh <- p.serve(serveOptions{launcherSocketPath: launcherSock, stopCh: stopCh, entrypoint: "ep-a"})
 	}()
 
 	waitForSocket(t, launcherSock)
@@ -1078,7 +1081,7 @@ func TestServeWithEntrypointFiltersNodeHooks(t *testing.T) {
 	stopCh := make(chan struct{})
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- p.Serve(withNodeSocketPath(nodeSock), withStopCh(stopCh), withEntrypoint("ep-a"))
+		errCh <- p.serve(serveOptions{nodeSocketPath: nodeSock, stopCh: stopCh, entrypoint: "ep-a"})
 	}()
 
 	waitForSocket(t, nodeSock)
@@ -1131,7 +1134,7 @@ func TestServeSingleEntrypointNoFlagOK(t *testing.T) {
 	stopCh := make(chan struct{})
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- p.Serve(withLauncherSocketPath(launcherSock), withStopCh(stopCh))
+		errCh <- p.serve(serveOptions{launcherSocketPath: launcherSock, stopCh: stopCh})
 	}()
 
 	waitForSocket(t, launcherSock)
@@ -1156,7 +1159,7 @@ func TestServeWithNoHooks(t *testing.T) {
 func TestServeNonExistentEntrypointErrors(t *testing.T) {
 	p := New("test-plugin").WithNodeHook(NodeHookPreVMStart, NodeHandler(&stubNodeHandler{}))
 
-	err := p.Serve(withEntrypoint("non-existent"))
+	err := p.serve(serveOptions{entrypoint: "non-existent"})
 	if err == nil {
 		t.Fatal("expected error for non-existent entrypoint")
 	}
@@ -1191,7 +1194,7 @@ func TestServeMixedSidecarAndCEL(t *testing.T) {
 	stopCh := make(chan struct{})
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- p.Serve(withLauncherSocketPath(launcherSock), withStopCh(stopCh))
+		errCh <- p.serve(serveOptions{launcherSocketPath: launcherSock, stopCh: stopCh})
 	}()
 
 	waitForSocket(t, launcherSock)
@@ -1319,17 +1322,12 @@ func TestParseServeArgs(t *testing.T) {
 		t.Fatalf("parseServeArgs failed: %v", err)
 	}
 
-	options := &serveOptions{}
-	for _, opt := range serveOpts {
-		opt(options)
+	if serveOpts.entrypoint != "ep-a" {
+		t.Fatalf("expected entrypoint %q, got %q", "ep-a", serveOpts.entrypoint)
 	}
 
-	if options.entrypoint != "ep-a" {
-		t.Fatalf("expected entrypoint %q, got %q", "ep-a", options.entrypoint)
-	}
-
-	if options.role != roleSidecar {
-		t.Fatalf("expected role %q, got %q", roleSidecar, options.role)
+	if serveOpts.role != roleSidecar {
+		t.Fatalf("expected role %q, got %q", roleSidecar, serveOpts.role)
 	}
 }
 
@@ -1377,7 +1375,7 @@ func TestServeWithRoleWithoutMatchingHooksErrors(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			err := test.plugin.Serve(withRole(test.role))
+			err := test.plugin.serve(serveOptions{role: test.role})
 			if err == nil {
 				t.Fatalf("expected error when serving role %q without matching hooks", test.role)
 			}
