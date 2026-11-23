@@ -733,13 +733,22 @@ func TestPanicsOnInvalidSidecarPodLabels(t *testing.T) {
 		{"value not ending with a letter or digit", "gate", "value-"},
 		{"key too long", strings.Repeat("a", 64), "value"},
 		{"value too long", "gate", strings.Repeat("a", 64)},
+		{"empty name after prefix", "example.com/", "value"},
+		{"empty prefix", "/gate", "value"},
+		{"prefix starting with a hyphen", "-a/gate", "value"},
+		{"prefix with consecutive dots", "a..b/gate", "value"},
 		{"uppercase prefix", "Example.com/gate", "value"},
 		{"prefix too long", strings.Repeat("a", 254) + "/gate", "value"},
+		{"key with non-ASCII character", "a\u0161b", "value"},
+		{"value with non-ASCII character", "gate", "a\u0161b"},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			assertPanics(t, "", func() { New("test").WithSidecarPodLabels(map[string]string{tc.key: tc.value}) })
+			// The panic message embeds the offending key %q-escaped; the
+			// empty key escapes to the empty string and matches any panic.
+			wantMsg := strings.Trim(fmt.Sprintf("%q", tc.key), `"`)
+			assertPanics(t, wantMsg, func() { New("test").WithSidecarPodLabels(map[string]string{tc.key: tc.value}) })
 		})
 	}
 }
