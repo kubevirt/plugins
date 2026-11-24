@@ -7,6 +7,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"maps"
 	"net"
 	"os"
 	"os/signal"
@@ -71,10 +72,8 @@ func (a *launcherHookAdapter) PreBoot(ctx context.Context, req *pb.PreBootReques
 		return nil, fmt.Errorf("failed to unmarshal VMI: %w", err)
 	}
 
-	artifactPaths := make(map[string]string, len(req.GetPreBootContext().GetArtifactPaths()))
-	for key, path := range req.GetPreBootContext().GetArtifactPaths() {
-		artifactPaths[key] = path
-	}
+	artifactPaths := map[string]string{}
+	maps.Copy(artifactPaths, req.GetPreBootContext().GetArtifactPaths())
 
 	if _, err := a.preBootHandler.PreBoot(ctx, &PreBootRequest{VMI: &vmi, ArtifactPaths: artifactPaths}); err != nil {
 		return nil, fmt.Errorf("pre boot handler failed: %w", err)
@@ -170,34 +169,12 @@ const (
 	domainTypeLibvirt = "libvirt"
 )
 
-type serveOption func(*serveOptions)
-
 type serveOptions struct {
 	launcherSocketPath string
 	nodeSocketPath     string
 	stopCh             <-chan struct{}
 	entrypoint         string
 	role               string
-}
-
-func withLauncherSocketPath(path string) serveOption {
-	return func(options *serveOptions) { options.launcherSocketPath = path }
-}
-
-func withNodeSocketPath(path string) serveOption {
-	return func(options *serveOptions) { options.nodeSocketPath = path }
-}
-
-func withStopCh(ch <-chan struct{}) serveOption {
-	return func(options *serveOptions) { options.stopCh = ch }
-}
-
-func withEntrypoint(entrypoint string) serveOption {
-	return func(options *serveOptions) { options.entrypoint = entrypoint }
-}
-
-func withRole(role string) serveOption {
-	return func(options *serveOptions) { options.role = role }
 }
 
 func (p *Plugin) launcherHooksForEntrypoint(entrypoint string) []LauncherHookOption {
@@ -224,49 +201,30 @@ func (p *Plugin) nodeHooksForEntrypoint(entrypoint string) []NodeHookOption {
 }
 
 func (p *Plugin) allEntrypoints() []string {
-	seen := map[string]bool{}
-	var entrypoints []string
-	for _, launcherHook := range p.launcherHooks {
-		if launcherHook.isCEL() {
-			continue
-		}
-		entrypoint := p.resolveEntrypoint(launcherHook.entrypoint)
-		if !seen[entrypoint] {
-			seen[entrypoint] = true
-			entrypoints = append(entrypoints, entrypoint)
-		}
-	}
-	for _, nodeHook := range p.nodeHooks {
-		entrypoint := p.resolveEntrypoint(nodeHook.entrypoint)
-		if !seen[entrypoint] {
-			seen[entrypoint] = true
-			entrypoints = append(entrypoints, entrypoint)
-		}
+	entrypoints := p.uniqueSidecarEntrypoints()
+	for _, entrypoint := range p.uniqueNodeEntrypoints() {
+		entrypoints = appendUnique(entrypoints, entrypoint)
 	}
 	return entrypoints
 }
 
 // Serve starts the gRPC servers for the registered hooks and blocks until
-// a signal or stop channel triggers shutdown.
-func (p *Plugin) Serve(opts ...serveOption) error {
-	options := &serveOptions{}
-	for _, opt := range opts {
-		opt(options)
-	}
+// SIGINT or SIGTERM triggers shutdown.
+func (p *Plugin) Serve() error {
+	return p.serve(serveOptions{})
+}
 
-	var launcherHooks []LauncherHookOption
-	var nodeHooks []NodeHookOption
+func (p *Plugin) serve(options serveOptions) error {
 	var effectiveEntrypoint string
 
 	if options.entrypoint != "" {
 		effectiveEntrypoint = options.entrypoint
-		launcherHooks = p.launcherHooksForEntrypoint(effectiveEntrypoint)
-		nodeHooks = p.nodeHooksForEntrypoint(effectiveEntrypoint)
 	} else {
 		allEntrypoints := p.allEntrypoints()
 		if len(allEntrypoints) == 0 {
-			hasCELOnly := len(p.launcherHooks) > 0 && len(p.sidecarLauncherHooks()) == 0 && len(p.nodeHooks) == 0
-			if hasCELOnly {
+			// An empty allEntrypoints already implies no sidecar launcher or
+			// node hooks, so any remaining launcher hooks are CEL-only.
+			if len(p.launcherHooks) > 0 {
 				return fmt.Errorf("plugin has only CEL launcher hooks which are evaluated by kubevirt directly; Serve() is not needed")
 			}
 			return fmt.Errorf("no hooks registered")
@@ -275,9 +233,9 @@ func (p *Plugin) Serve(opts ...serveOption) error {
 			return fmt.Errorf("multiple entrypoints found (%v); use --entrypoint to select one", allEntrypoints)
 		}
 		effectiveEntrypoint = allEntrypoints[0]
-		launcherHooks = p.launcherHooksForEntrypoint(effectiveEntrypoint)
-		nodeHooks = p.nodeHooksForEntrypoint(effectiveEntrypoint)
 	}
+	launcherHooks := p.launcherHooksForEntrypoint(effectiveEntrypoint)
+	nodeHooks := p.nodeHooksForEntrypoint(effectiveEntrypoint)
 
 	switch options.role {
 	case roleSidecar:
@@ -415,7 +373,7 @@ func (p *Plugin) Execute() {
 		if err != nil {
 			log.Fatalf("serve failed: %v", err)
 		}
-		if err := p.Serve(serveOpts...); err != nil {
+		if err := p.serve(serveOpts); err != nil {
 			log.Fatalf("serve failed: %v", err)
 		}
 	case "generate":
@@ -432,21 +390,21 @@ func (p *Plugin) Execute() {
 	}
 }
 
-func parseServeArgs(args []string) ([]serveOption, error) {
+func parseServeArgs(args []string) (serveOptions, error) {
 	flags := flag.NewFlagSet("serve", flag.ContinueOnError)
 	entrypoint := flags.String("entrypoint", "", "serve only the hooks of this entrypoint")
 	role := flags.String("role", "", fmt.Sprintf("serve only the launcher hooks (%s) or only the node hooks (%s)", roleSidecar, roleDaemonSet))
 	if err := flags.Parse(args); err != nil {
-		return nil, err
+		return serveOptions{}, err
 	}
 
 	if flags.NArg() > 0 {
-		return nil, fmt.Errorf("unexpected arguments %v", flags.Args())
+		return serveOptions{}, fmt.Errorf("unexpected arguments %v", flags.Args())
 	}
 
 	if *role != "" && *role != roleSidecar && *role != roleDaemonSet {
-		return nil, fmt.Errorf("unknown role %q; must be %q or %q", *role, roleSidecar, roleDaemonSet)
+		return serveOptions{}, fmt.Errorf("unknown role %q; must be %q or %q", *role, roleSidecar, roleDaemonSet)
 	}
 
-	return []serveOption{withEntrypoint(*entrypoint), withRole(*role)}, nil
+	return serveOptions{entrypoint: *entrypoint, role: *role}, nil
 }

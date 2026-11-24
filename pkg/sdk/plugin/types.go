@@ -54,23 +54,23 @@ const (
 )
 
 const (
-	// LauncherSocketBasePath is the base directory for launcher hook sockets.
-	LauncherSocketBasePath = "/var/run/kubevirt-plugin"
-	// NodeSocketBasePath is the base directory for node hook sockets.
-	NodeSocketBasePath = "/var/run/kubevirt/plugins"
-	// PluginSocketsVolumeName is the virt-launcher pod volume the plugin sockets live in.
-	PluginSocketsVolumeName = "kubevirt-plugin-sockets"
-	// EphemeralDisksVolumeName is the virt-launcher pod volume holding the PreBoot artifacts.
-	EphemeralDisksVolumeName = "ephemeral-disks"
-	// EphemeralDisksMountPath is where virt-launcher mounts the ephemeral
+	// launcherSocketBasePath is the base directory for launcher hook sockets.
+	launcherSocketBasePath = "/var/run/kubevirt-plugin"
+	// nodeSocketBasePath is the base directory for node hook sockets.
+	nodeSocketBasePath = "/var/run/kubevirt/plugins"
+	// pluginSocketsVolumeName is the virt-launcher pod volume the plugin sockets live in.
+	pluginSocketsVolumeName = "kubevirt-plugin-sockets"
+	// ephemeralDisksVolumeName is the virt-launcher pod volume holding the PreBoot artifacts.
+	ephemeralDisksVolumeName = "ephemeral-disks"
+	// ephemeralDisksMountPath is where virt-launcher mounts the ephemeral
 	// disks; a PreBoot sidecar must mount the volume at the same path to see
 	// the artifacts.
-	EphemeralDisksMountPath = "/var/run/kubevirt-ephemeral-disks"
-	// SidecarUID and SidecarGID identify the qemu user virt-launcher owns the
+	ephemeralDisksMountPath = "/var/run/kubevirt-ephemeral-disks"
+	// sidecarUID and sidecarGID identify the qemu user virt-launcher owns the
 	// boot artifacts with; a PreBoot sidecar needs them to read and rewrite
 	// the artifacts.
-	SidecarUID = 107
-	SidecarGID = 107
+	sidecarUID = 107
+	sidecarGID = 107
 )
 
 // LauncherSocketPath returns the socket path a launcher hook sidecar serves
@@ -78,9 +78,9 @@ const (
 // when it is empty or equals the plugin name the default path is used.
 func LauncherSocketPath(pluginName, entrypoint string) string {
 	if entrypoint == "" || entrypoint == pluginName {
-		return filepath.Join(LauncherSocketBasePath, pluginName, "launcher.sock")
+		return filepath.Join(launcherSocketBasePath, pluginName, "launcher.sock")
 	}
-	return filepath.Join(LauncherSocketBasePath, pluginName, entrypoint, "launcher.sock")
+	return filepath.Join(launcherSocketBasePath, pluginName, entrypoint, "launcher.sock")
 }
 
 // NodeSocketPath returns the socket path a node hook DaemonSet serves for
@@ -88,7 +88,7 @@ func LauncherSocketPath(pluginName, entrypoint string) string {
 // when it is empty or equals the plugin name the default path is used.
 func NodeSocketPath(pluginName, entrypoint string) string {
 	if entrypoint == "" || entrypoint == pluginName {
-		return filepath.Join(NodeSocketBasePath, pluginName, "node.sock")
+		return filepath.Join(nodeSocketBasePath, pluginName, "node.sock")
 	}
-	return filepath.Join(NodeSocketBasePath, pluginName, entrypoint, "node.sock")
+	return filepath.Join(nodeSocketBasePath, pluginName, entrypoint, "node.sock")
 }

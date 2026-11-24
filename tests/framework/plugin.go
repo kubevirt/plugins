@@ -14,48 +14,48 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-type NoopGuestDefinitionHandler struct{}
-
-func (*NoopGuestDefinitionHandler) GuestDefinition(_ context.Context, _ *plugin.GuestDefinitionRequest) error {
-	return nil
-}
-
-type NoopNodeHandler struct{}
-
-func (*NoopNodeHandler) ExecuteNodeHook(_ context.Context, _ *plugin.NodeHookRequest) (*plugin.NodeHookResponse, error) {
-	return nil, nil
-}
-
 func (f *Framework) DeployPlugin(p *plugin.Plugin, namespace string) {
+	GinkgoHelper()
+
 	outputDir, err := os.MkdirTemp("", "plugin-deploy-")
-	ExpectWithOffset(1, err).NotTo(HaveOccurred())
+	Expect(err).NotTo(HaveOccurred())
 
 	// Generate also writes a Dockerfile and Makefile into the current
 	// directory and reads the Go version from its go.mod; run it in a
 	// scratch directory so the repository's own files are left alone.
 	sourceDir, err := os.MkdirTemp("", "plugin-source-")
-	ExpectWithOffset(1, err).NotTo(HaveOccurred())
+	Expect(err).NotTo(HaveOccurred())
 	defer os.RemoveAll(sourceDir) //nolint:errcheck
 	goMod, err := os.ReadFile(filepath.Join(f.RepoRoot, "go.mod"))
-	ExpectWithOffset(1, err).NotTo(HaveOccurred())
-	ExpectWithOffset(1, os.WriteFile(filepath.Join(sourceDir, "go.mod"), goMod, 0644)).To(Succeed())
+	Expect(err).NotTo(HaveOccurred())
+	Expect(os.WriteFile(filepath.Join(sourceDir, "go.mod"), goMod, 0644)).To(Succeed())
 
 	origDir, err := os.Getwd()
-	ExpectWithOffset(1, err).NotTo(HaveOccurred())
-	ExpectWithOffset(1, os.Chdir(sourceDir)).To(Succeed())
+	Expect(err).NotTo(HaveOccurred())
+	Expect(os.Chdir(sourceDir)).To(Succeed())
 	defer os.Chdir(origDir) //nolint:errcheck
 
-	ExpectWithOffset(1, p.Generate(outputDir)).To(Succeed())
+	Expect(p.Generate(outputDir)).To(Succeed())
 	f.kubectlApply(outputDir, namespace)
 
 	if hasMAP(outputDir) {
-		f.waitForMAPReady(outputDir)
+		f.waitForMAPReady()
 	}
 
 	DeferCleanup(func() {
 		f.CollectArtifacts(namespace)
 		f.UndeployPlugin(outputDir, namespace)
 	})
+}
+
+// DeploySuitePlugin deploys a suite's plugin into ns with the image
+// hack/cluster-build.sh builds for it: the container prefix plus the suite
+// directory's name.
+func (f *Framework) DeploySuitePlugin(p *plugin.Plugin, ns, suiteDir string) {
+	GinkgoHelper()
+
+	p.WithNamespace(ns).WithImage(f.ContainerPrefix + "/" + suiteDir + ":latest")
+	f.DeployPlugin(p, ns)
 }
 
 func (f *Framework) UndeployPlugin(outputDir, namespace string) {
@@ -74,8 +74,10 @@ func (f *Framework) WaitForDaemonSetReady(namespace, name string) {
 }
 
 func (f *Framework) kubectlApply(dir, namespace string) {
+	GinkgoHelper()
+
 	entries, err := os.ReadDir(dir)
-	ExpectWithOffset(2, err).NotTo(HaveOccurred())
+	Expect(err).NotTo(HaveOccurred())
 
 	for _, entry := range entries {
 		if filepath.Ext(entry.Name()) != ".yaml" {
@@ -105,8 +107,10 @@ func (f *Framework) kubectlDelete(dir, namespace string) {
 }
 
 func (f *Framework) kubectl(args ...string) []byte {
+	GinkgoHelper()
+
 	output, err := f.kubectlCommand(args...).CombinedOutput()
-	ExpectWithOffset(2, err).NotTo(HaveOccurred(), "kubectl %v failed: %s", args, string(output))
+	Expect(err).NotTo(HaveOccurred(), "kubectl %v failed: %s", args, string(output))
 	return output
 }
 
@@ -127,6 +131,6 @@ func hasMAP(dir string) bool {
 // CEL expressions. Compilation happens asynchronously after creation; pods
 // created before it completes won't have mutations applied. There is no API
 // to check compilation status, so we use a fixed delay.
-func (f *Framework) waitForMAPReady(_ string) {
+func (f *Framework) waitForMAPReady() {
 	time.Sleep(5 * time.Second)
 }

@@ -2,7 +2,10 @@
 
 // Package artifact atomically replaces the boot artifacts KubeVirt passes to
 // PreBoot launcher hooks: the caller modifies a private copy of the artifact,
-// which is then swapped in. See the README for PreBoot authoring guidance.
+// which is then swapped in. The swap preserves the original's ownership and
+// permissions, so a PreBoot sidecar needs no CAP_CHOWN: the artifacts are
+// owned by the qemu user (uid and gid 107), the same user the generated
+// sidecars run as. See the README for PreBoot authoring guidance.
 package artifact
 
 import (

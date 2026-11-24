@@ -4,7 +4,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/kubevirt/plugins/pkg/sdk/testing/fixtures"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	v1 "kubevirt.io/api/core/v1"
 )
 
 func TestValidateConditionAcceptsGoFieldNames(t *testing.T) {
@@ -45,7 +46,7 @@ func TestValidateConditionAcceptsExtFunctions(t *testing.T) {
 // TestValidateConditionAcceptsHighestPinnedExtVersions asserts the ext
 // library version pins reproduce cel-go v0.26.0's unversioned defaults,
 // which KubeVirt v1.10's admitter compiles conditions with: every function
-// gated at the pinned versions (strings 4, math 2, lists 2) must still
+// gated at the pinned versions (strings 4, math 2, lists 3) must still
 // compile. The pins keep a newer cel-go, resolved into a plugin's build
 // through MVS, from adding higher-version functions to the validation
 // environment that the admitter would reject; no such function exists as of
@@ -64,53 +65,36 @@ func TestValidateConditionAcceptsHighestPinnedExtVersions(t *testing.T) {
 	}
 }
 
-func TestValidateConditionRejectsJSONStyleFieldNames(t *testing.T) {
-	invalidExprs := []string{
-		"vmi.metadata.name == 'test'",
-		"vmi.spec.domain.cpu.cores > 0",
+func TestValidateConditionRejects(t *testing.T) {
+	invalidExprs := []struct {
+		expr   string
+		reason string
+	}{
+		{"vmi.metadata.name == 'test'", "JSON-style field name"},
+		{"vmi.spec.domain.cpu.cores > 0", "JSON-style field name"},
+		{"domainSpec.Name == 'x'", "domainSpec is not available in conditions"},
+		{"vmi.Name ==", "invalid syntax"},
+		{"vmi.Spec.Doman.CPU.Cores > 2", "unknown field"},
+		{"vmi.Name", "non-bool result"},
 	}
 
-	for _, expr := range invalidExprs {
-		if err := ValidateCondition(expr); err == nil {
-			t.Errorf("expected JSON-style expression %q to fail validation", expr)
+	for _, tc := range invalidExprs {
+		if err := ValidateCondition(tc.expr); err == nil {
+			t.Errorf("expected expression %q to be rejected (%s)", tc.expr, tc.reason)
 		}
 	}
 }
 
-func TestValidateConditionRejectsDomainSpec(t *testing.T) {
-	err := ValidateCondition("domainSpec.Name == 'x'")
-
-	if err == nil {
-		t.Error("expected domainSpec to be rejected in conditions")
-	}
-}
-
-func TestValidateConditionRejectsInvalidSyntax(t *testing.T) {
-	err := ValidateCondition("vmi.Name ==")
-
-	if err == nil {
-		t.Error("expected invalid syntax to fail validation")
-	}
-}
-
-func TestValidateConditionRejectsUnknownField(t *testing.T) {
-	err := ValidateCondition("vmi.Spec.Doman.CPU.Cores > 2")
-
-	if err == nil {
-		t.Error("expected unknown field to be rejected")
-	}
-}
-
-func TestValidateConditionRejectsNonBool(t *testing.T) {
-	err := ValidateCondition("vmi.Name")
-
-	if err == nil {
-		t.Error("expected non-bool return type to be rejected for condition expression")
+// basicVMI returns a VMI with the fields the evaluated expressions read.
+func basicVMI() *v1.VirtualMachineInstance {
+	return &v1.VirtualMachineInstance{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-vmi"},
+		Spec:       v1.VirtualMachineInstanceSpec{Domain: v1.DomainSpec{CPU: &v1.CPU{Cores: 2}}},
 	}
 }
 
 func TestEvaluateConditionTrue(t *testing.T) {
-	vmi := fixtures.BasicVMI()
+	vmi := basicVMI()
 
 	result, err := EvaluateCondition("vmi.Name == 'test-vmi'", vmi)
 	if err != nil {
@@ -123,7 +107,7 @@ func TestEvaluateConditionTrue(t *testing.T) {
 }
 
 func TestEvaluateConditionFalse(t *testing.T) {
-	vmi := fixtures.BasicVMI()
+	vmi := basicVMI()
 
 	result, err := EvaluateCondition("vmi.Name == 'other'", vmi)
 	if err != nil {
@@ -136,7 +120,7 @@ func TestEvaluateConditionFalse(t *testing.T) {
 }
 
 func TestEvaluateConditionNestedField(t *testing.T) {
-	vmi := fixtures.BasicVMI()
+	vmi := basicVMI()
 
 	result, err := EvaluateCondition("vmi.Spec.Domain.CPU.Cores > 1", vmi)
 	if err != nil {
@@ -149,7 +133,7 @@ func TestEvaluateConditionNestedField(t *testing.T) {
 }
 
 func TestEvaluateConditionMissingMapKeyFails(t *testing.T) {
-	vmi := fixtures.BasicVMI()
+	vmi := basicVMI()
 	vmi.Labels = map[string]string{"app": "test"}
 
 	_, err := EvaluateCondition(`vmi.Labels["missing"] == "v"`, vmi)
@@ -163,7 +147,7 @@ func TestEvaluateConditionMissingMapKeyFails(t *testing.T) {
 }
 
 func TestEvaluateConditionGuardedMapAccess(t *testing.T) {
-	vmi := fixtures.BasicVMI()
+	vmi := basicVMI()
 	vmi.Labels = map[string]string{"app": "test"}
 
 	result, err := EvaluateCondition(`"app" in vmi.Labels && vmi.Labels["app"] == "test"`, vmi)
@@ -177,7 +161,7 @@ func TestEvaluateConditionGuardedMapAccess(t *testing.T) {
 }
 
 func TestEvaluateConditionEmptyReturnsTrue(t *testing.T) {
-	vmi := fixtures.BasicVMI()
+	vmi := basicVMI()
 
 	result, err := EvaluateCondition("", vmi)
 	if err != nil {
@@ -190,7 +174,7 @@ func TestEvaluateConditionEmptyReturnsTrue(t *testing.T) {
 }
 
 func TestEvaluateConditionInvalidExpr(t *testing.T) {
-	vmi := fixtures.BasicVMI()
+	vmi := basicVMI()
 
 	_, err := EvaluateCondition("vmi.Name ==", vmi)
 	if err == nil {
@@ -203,7 +187,7 @@ func TestEvaluateConditionInvalidExpr(t *testing.T) {
 }
 
 func TestEvaluateConditionNonBool(t *testing.T) {
-	vmi := fixtures.BasicVMI()
+	vmi := basicVMI()
 
 	_, err := EvaluateCondition("vmi.Name", vmi)
 	if err == nil {
@@ -231,43 +215,23 @@ func TestValidateGuestDefinitionExpressionValid(t *testing.T) {
 	}
 }
 
-func TestValidateGuestDefinitionExpressionRejectsNonDomain(t *testing.T) {
-	invalidExprs := []string{
-		"true",
-		`"not a domain"`,
-		"vmi.Name",
+func TestValidateGuestDefinitionExpressionRejects(t *testing.T) {
+	invalidExprs := []struct {
+		expr   string
+		reason string
+	}{
+		{"true", "non-Domain result"},
+		{`"not a domain"`, "non-Domain result"},
+		{"vmi.Name", "non-Domain result"},
+		{`Domain{Bogus: "x"}`, "unknown field"},
+		{`Domain{Title: vmi.metadata.name}`, "JSON-style field name"},
+		{`Domain{title: "x"}`, "JSON-style field name"},
+		{"invalid >>><< expression", "invalid syntax"},
 	}
 
-	for _, expr := range invalidExprs {
-		if err := ValidateGuestDefinitionExpression(expr); err == nil {
-			t.Errorf("expected non-Domain expression %q to be rejected", expr)
+	for _, tc := range invalidExprs {
+		if err := ValidateGuestDefinitionExpression(tc.expr); err == nil {
+			t.Errorf("expected expression %q to be rejected (%s)", tc.expr, tc.reason)
 		}
-	}
-}
-
-func TestValidateGuestDefinitionExpressionRejectsUnknownField(t *testing.T) {
-	err := ValidateGuestDefinitionExpression(`Domain{Bogus: "x"}`)
-
-	if err == nil {
-		t.Error("expected unknown field to be rejected")
-	}
-}
-
-func TestValidateGuestDefinitionExpressionRejectsJSONStyleFieldNames(t *testing.T) {
-	invalidExprs := []string{
-		`Domain{Title: vmi.metadata.name}`,
-		`Domain{title: "x"}`,
-	}
-
-	for _, expr := range invalidExprs {
-		if err := ValidateGuestDefinitionExpression(expr); err == nil {
-			t.Errorf("expected JSON-style expression %q to be rejected", expr)
-		}
-	}
-}
-
-func TestValidateGuestDefinitionExpressionRejectsInvalidSyntax(t *testing.T) {
-	if err := ValidateGuestDefinitionExpression("invalid >>><< expression"); err == nil {
-		t.Fatal("expected error for invalid CEL expression")
 	}
 }

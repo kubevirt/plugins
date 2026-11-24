@@ -49,7 +49,7 @@ func (*preBootArtifactHook) PreBoot(ctx context.Context, req *plugin.PreBootRequ
 			return fmt.Errorf("cloud-init ISO contains neither %q nor %q", markerBefore, markerAfter)
 		}
 		mutated = true
-		if err := os.WriteFile(tmpPath, bytes.Replace(data, []byte(markerBefore), []byte(markerAfter), -1), 0o600); err != nil {
+		if err := os.WriteFile(tmpPath, bytes.ReplaceAll(data, []byte(markerBefore), []byte(markerAfter)), 0o600); err != nil {
 			return err
 		}
 		// Keep the copy at 0600 so only the helper's metadata restore can

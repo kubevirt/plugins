@@ -18,8 +18,7 @@ var _ = Describe("Pre Boot", func() {
 	It("should run after the cloud-init ISO was generated", func() {
 		ns := framework.TestContext.Namespace
 
-		p := newPlugin().WithNamespace(ns).WithImage(framework.TestContext.ContainerPrefix + "/pre_boot:latest")
-		framework.TestContext.DeployPlugin(p, ns)
+		framework.TestContext.DeploySuitePlugin(newPlugin(), ns, "pre_boot")
 
 		vmi := framework.TestContext.CreateVMI(ns, framework.WithCloudInitNoCloud("#cloud-config\npassword: test\n"))
 		framework.TestContext.WaitForVMIRunning(ns, vmi.Name)
@@ -37,8 +36,7 @@ var _ = Describe("Pre Boot", func() {
 	It("should keep the VMI from running when the hook fails with the Fail strategy", func() {
 		ns := framework.TestContext.Namespace
 
-		p := newPlugin().WithNamespace(ns).WithImage(framework.TestContext.ContainerPrefix + "/pre_boot:latest")
-		framework.TestContext.DeployPlugin(p, ns)
+		framework.TestContext.DeploySuitePlugin(newPlugin(), ns, "pre_boot")
 
 		vmi := framework.TestContext.CreateVMI(ns, framework.WithLabels(map[string]string{"sdk-preboot-fail": "true"}))
 

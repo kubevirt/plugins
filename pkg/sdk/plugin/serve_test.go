@@ -127,11 +127,17 @@ func testDomainXML(t *testing.T, name string) []byte {
 	return []byte(xmlStr)
 }
 
-func waitForSocket(t *testing.T, path string) {
+func waitForSocket(t *testing.T, path string, errCh <-chan error) {
 	t.Helper()
 
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
+		select {
+		case err := <-errCh:
+			t.Fatalf("serve returned before socket %s became connectable: %v", path, err)
+		default:
+		}
+
 		conn, err := net.DialTimeout("unix", path, 100*time.Millisecond)
 		if err == nil {
 			conn.Close()
@@ -168,28 +174,6 @@ func awaitServeStop(t *testing.T, errCh <-chan error) {
 	}
 }
 
-func waitForSocketWhileServing(t *testing.T, path string, errCh <-chan error) {
-	t.Helper()
-
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		select {
-		case err := <-errCh:
-			t.Fatalf("serve returned before socket %s became connectable: %v", path, err)
-		default:
-		}
-
-		conn, err := net.DialTimeout("unix", path, 100*time.Millisecond)
-		if err == nil {
-			conn.Close()
-			return
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-
-	t.Fatalf("socket %s did not become connectable within timeout", path)
-}
-
 // unservableSocketPath returns a socket path under a regular file, so serving on it fails.
 func unservableSocketPath(t *testing.T) string {
 	t.Helper()
@@ -202,20 +186,36 @@ func unservableSocketPath(t *testing.T) string {
 	return filepath.Join(notADirectory, "x.sock")
 }
 
-func serveWithArgs(t *testing.T, plugin *Plugin, args []string, launcherSock, nodeSock string, stopCh <-chan struct{}) <-chan error {
+// serveWithArgs parses args, overrides the socket paths, and starts p.serve
+// on a fresh stop channel like serveInBackground; the caller keeps closing
+// the channel and awaiting the returned error channel.
+func serveWithArgs(t *testing.T, plugin *Plugin, args []string, launcherSock, nodeSock string) (chan struct{}, <-chan error) {
 	t.Helper()
 
 	serveOpts, err := parseServeArgs(args)
 	if err != nil {
 		t.Fatalf("failed to parse serve args %v: %v", args, err)
 	}
+	serveOpts.launcherSocketPath = launcherSock
+	serveOpts.nodeSocketPath = nodeSock
+
+	return serveInBackground(t, plugin, serveOpts)
+}
+
+// serveInBackground starts p.serve on a fresh stop channel; the caller keeps
+// closing the channel and awaiting the returned error channel.
+func serveInBackground(t *testing.T, p *Plugin, options serveOptions) (chan struct{}, <-chan error) {
+	t.Helper()
+
+	stopCh := make(chan struct{})
+	options.stopCh = stopCh
 
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- plugin.Serve(append(serveOpts, withLauncherSocketPath(launcherSock), withNodeSocketPath(nodeSock), withStopCh(stopCh))...)
+		errCh <- p.serve(options)
 	}()
 
-	return errCh
+	return stopCh, errCh
 }
 
 // --- Adapter unit tests ---
@@ -627,48 +627,38 @@ func TestNodeHookAdapterNilNodeContext(t *testing.T) {
 // --- Integration tests ---
 
 func TestServeStartsAndStopsGracefully(t *testing.T) {
-	tmpDir := t.TempDir()
-	launcherSock := filepath.Join(tmpDir, "launcher.sock")
+	launcherSock := filepath.Join(t.TempDir(), "launcher.sock")
 
 	handler := &mutatingGuestDefinitionHandler{}
 	p := New("test-plugin").WithLauncherHook(GuestDefinition(handler))
 
-	stopCh := make(chan struct{})
-	errCh := make(chan error, 1)
-	go func() {
-		errCh <- p.Serve(withLauncherSocketPath(launcherSock), withStopCh(stopCh))
-	}()
+	stopCh, errCh := serveInBackground(t, p, serveOptions{launcherSocketPath: launcherSock})
 
-	waitForSocket(t, launcherSock)
+	waitForSocket(t, launcherSock, errCh)
 
 	close(stopCh)
 	awaitServeStop(t, errCh)
 }
 
-func TestServeRegistersLauncherHookAdapter(t *testing.T) {
-	tmpDir := t.TempDir()
-	launcherSock := filepath.Join(tmpDir, "launcher.sock")
+func TestServeServesAllLauncherHookPointsOfAnEntrypoint(t *testing.T) {
+	launcherSock := filepath.Join(t.TempDir(), "launcher.sock")
 
-	handler := &mutatingGuestDefinitionHandler{}
-	p := New("test-plugin").WithLauncherHook(GuestDefinition(handler))
+	guestDefinitionHandler := &mutatingGuestDefinitionHandler{}
+	preBootHandler := &recordingPreBootHandler{}
+	preMigrationSourceHandler := &recordingPreMigrationSourceHandler{}
+	p := New("test-plugin").
+		WithLauncherHook(GuestDefinition(guestDefinitionHandler)).
+		WithLauncherHook(PreBoot(preBootHandler)).
+		WithLauncherHook(PreMigrationSource(preMigrationSourceHandler))
 
-	stopCh := make(chan struct{})
-	errCh := make(chan error, 1)
-	go func() {
-		errCh <- p.Serve(withLauncherSocketPath(launcherSock), withStopCh(stopCh))
-	}()
+	stopCh, errCh := serveInBackground(t, p, serveOptions{launcherSocketPath: launcherSock})
 
-	waitForSocket(t, launcherSock)
+	waitForSocket(t, launcherSock, errCh)
 
 	conn := dialSocket(t, launcherSock)
 	client := pb.NewLauncherHookServiceClient(conn)
 
-	resp, err := client.GuestDefinition(context.Background(), &pb.GuestDefinitionRequest{
-		DomainType:     "libvirt",
-		Domain:         testDomainXML(t, "original"),
-		Vmi:            mustMarshalVMI(t, testVMI("grpc-test-vmi")),
-		SidecarContext: &pb.SidecarContext{},
-	})
+	resp, err := client.GuestDefinition(context.Background(), &pb.GuestDefinitionRequest{DomainType: "libvirt", Domain: testDomainXML(t, "original"), Vmi: mustMarshalVMI(t, testVMI("test")), SidecarContext: &pb.SidecarContext{}})
 	if err != nil {
 		t.Fatalf("GuestDefinition RPC failed: %v", err)
 	}
@@ -680,37 +670,6 @@ func TestServeRegistersLauncherHookAdapter(t *testing.T) {
 
 	if result.Name != "mutated-original" {
 		t.Fatalf("expected mutated domain name, got %q", result.Name)
-	}
-
-	close(stopCh)
-	awaitServeStop(t, errCh)
-}
-
-func TestServeServesAllLauncherHookPointsOfAnEntrypoint(t *testing.T) {
-	tmpDir := t.TempDir()
-	launcherSock := filepath.Join(tmpDir, "launcher.sock")
-
-	guestDefinitionHandler := &mutatingGuestDefinitionHandler{}
-	preBootHandler := &recordingPreBootHandler{}
-	preMigrationSourceHandler := &recordingPreMigrationSourceHandler{}
-	p := New("test-plugin").
-		WithLauncherHook(GuestDefinition(guestDefinitionHandler)).
-		WithLauncherHook(PreBoot(preBootHandler)).
-		WithLauncherHook(PreMigrationSource(preMigrationSourceHandler))
-
-	stopCh := make(chan struct{})
-	errCh := make(chan error, 1)
-	go func() {
-		errCh <- p.Serve(withLauncherSocketPath(launcherSock), withStopCh(stopCh))
-	}()
-
-	waitForSocket(t, launcherSock)
-
-	conn := dialSocket(t, launcherSock)
-	client := pb.NewLauncherHookServiceClient(conn)
-
-	if _, err := client.GuestDefinition(context.Background(), &pb.GuestDefinitionRequest{DomainType: "libvirt", Domain: testDomainXML(t, "original"), Vmi: mustMarshalVMI(t, testVMI("test")), SidecarContext: &pb.SidecarContext{}}); err != nil {
-		t.Fatalf("GuestDefinition RPC failed: %v", err)
 	}
 
 	if _, err := client.PreBoot(context.Background(), &pb.PreBootRequest{Vmi: mustMarshalVMI(t, testVMI("test")), PreBootContext: &pb.PreBootContext{ArtifactPaths: map[string]string{pb.PreBootArtifactEphemeralDiskDir: "/var/run/kubevirt-ephemeral-disks"}}}); err != nil {
@@ -738,18 +697,13 @@ func TestServeServesAllLauncherHookPointsOfAnEntrypoint(t *testing.T) {
 }
 
 func TestServePanicReturnsInternal(t *testing.T) {
-	tmpDir := t.TempDir()
-	launcherSock := filepath.Join(tmpDir, "launcher.sock")
+	launcherSock := filepath.Join(t.TempDir(), "launcher.sock")
 
 	p := New("test-plugin").WithLauncherHook(GuestDefinition(&panickingGuestDefinitionHandler{}))
 
-	stopCh := make(chan struct{})
-	errCh := make(chan error, 1)
-	go func() {
-		errCh <- p.Serve(withLauncherSocketPath(launcherSock), withStopCh(stopCh))
-	}()
+	stopCh, errCh := serveInBackground(t, p, serveOptions{launcherSocketPath: launcherSock})
 
-	waitForSocket(t, launcherSock)
+	waitForSocket(t, launcherSock, errCh)
 
 	conn := dialSocket(t, launcherSock)
 	client := pb.NewLauncherHookServiceClient(conn)
@@ -783,18 +737,13 @@ func TestServePanicReturnsInternal(t *testing.T) {
 }
 
 func TestServeNodeHookPanicReturnsInternal(t *testing.T) {
-	tmpDir := t.TempDir()
-	nodeSock := filepath.Join(tmpDir, "node.sock")
+	nodeSock := filepath.Join(t.TempDir(), "node.sock")
 
 	p := New("test-plugin").WithNodeHook(NodeHookPreVMStart, NodeHandler(&panickingNodeHandler{}))
 
-	stopCh := make(chan struct{})
-	errCh := make(chan error, 1)
-	go func() {
-		errCh <- p.Serve(withNodeSocketPath(nodeSock), withStopCh(stopCh))
-	}()
+	stopCh, errCh := serveInBackground(t, p, serveOptions{nodeSocketPath: nodeSock})
 
-	waitForSocket(t, nodeSock)
+	waitForSocket(t, nodeSock, errCh)
 
 	conn := dialSocket(t, nodeSock)
 	client := pb.NewNodeHookServiceClient(conn)
@@ -823,19 +772,14 @@ func TestServeNodeHookPanicReturnsInternal(t *testing.T) {
 }
 
 func TestServeRegistersNodeHookAdapter(t *testing.T) {
-	tmpDir := t.TempDir()
-	nodeSock := filepath.Join(tmpDir, "node.sock")
+	nodeSock := filepath.Join(t.TempDir(), "node.sock")
 
 	handler := &recordingNodeHandler{}
 	p := New("test-plugin").WithNodeHook(NodeHookPreVMStart, NodeHandler(handler))
 
-	stopCh := make(chan struct{})
-	errCh := make(chan error, 1)
-	go func() {
-		errCh <- p.Serve(withNodeSocketPath(nodeSock), withStopCh(stopCh))
-	}()
+	stopCh, errCh := serveInBackground(t, p, serveOptions{nodeSocketPath: nodeSock})
 
-	waitForSocket(t, nodeSock)
+	waitForSocket(t, nodeSock, errCh)
 
 	conn := dialSocket(t, nodeSock)
 	client := pb.NewNodeHookServiceClient(conn)
@@ -881,49 +825,55 @@ func TestLauncherHookAdapterInvalidXML(t *testing.T) {
 	}
 }
 
-func TestLauncherHookAdapterInvalidVMIJSON(t *testing.T) {
-	adapter := &launcherHookAdapter{guestDefinitionHandler: &mutatingGuestDefinitionHandler{}}
+func TestAdaptersRejectInvalidVMIJSON(t *testing.T) {
+	invalidVMI := []byte("not-valid-json{{{")
+	guestDefinitionAdapter := &launcherHookAdapter{guestDefinitionHandler: &mutatingGuestDefinitionHandler{}}
+	preBootAdapter := &launcherHookAdapter{preBootHandler: &recordingPreBootHandler{}}
+	preMigrationSourceAdapter := &launcherHookAdapter{preMigrationSourceHandler: &recordingPreMigrationSourceHandler{}}
+	nodeAdapter := &nodeHookAdapter{handlers: map[NodeHookPoint]NodeHookHandler{NodeHookPreVMStart: &recordingNodeHandler{}}}
 
-	_, err := adapter.GuestDefinition(context.Background(), &pb.GuestDefinitionRequest{
-		DomainType:     "libvirt",
-		Domain:         testDomainXML(t, "test"),
-		Vmi:            []byte("not-valid-json{{{"),
-		SidecarContext: &pb.SidecarContext{},
-	})
-	if err == nil {
-		t.Fatal("expected error for invalid VMI JSON")
+	tests := []struct {
+		name string
+		call func() error
+	}{
+		{"GuestDefinition", func() error {
+			_, err := guestDefinitionAdapter.GuestDefinition(context.Background(), &pb.GuestDefinitionRequest{
+				DomainType:     "libvirt",
+				Domain:         testDomainXML(t, "test"),
+				Vmi:            invalidVMI,
+				SidecarContext: &pb.SidecarContext{},
+			})
+			return err
+		}},
+		{"PreBoot", func() error {
+			_, err := preBootAdapter.PreBoot(context.Background(), &pb.PreBootRequest{Vmi: invalidVMI})
+			return err
+		}},
+		{"PreMigrationSource", func() error {
+			_, err := preMigrationSourceAdapter.PreMigrationSource(context.Background(), &pb.PreMigrationSourceRequest{Vmi: invalidVMI})
+			return err
+		}},
+		{"ExecuteNodeHook", func() error {
+			_, err := nodeAdapter.ExecuteNodeHook(context.Background(), &pb.ExecuteNodeHookRequest{
+				HookPoint:   string(NodeHookPreVMStart),
+				Vmi:         invalidVMI,
+				NodeContext: &pb.NodeContext{NodeName: "node-1"},
+			})
+			return err
+		}},
 	}
 
-	if !strings.Contains(err.Error(), "unmarshal VMI") {
-		t.Fatalf("expected VMI unmarshal error, got: %v", err)
-	}
-}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			err := test.call()
+			if err == nil {
+				t.Fatal("expected error for invalid VMI JSON")
+			}
 
-func TestLauncherHookAdapterPreBootInvalidVMIJSON(t *testing.T) {
-	handler := &recordingPreBootHandler{}
-	adapter := &launcherHookAdapter{preBootHandler: handler}
-
-	_, err := adapter.PreBoot(context.Background(), &pb.PreBootRequest{Vmi: []byte("not-valid-json{{{")})
-	if err == nil {
-		t.Fatal("expected error for invalid VMI JSON")
-	}
-
-	if !strings.Contains(err.Error(), "unmarshal VMI") {
-		t.Fatalf("expected VMI unmarshal error, got: %v", err)
-	}
-}
-
-func TestLauncherHookAdapterPreMigrationSourceInvalidVMIJSON(t *testing.T) {
-	handler := &recordingPreMigrationSourceHandler{}
-	adapter := &launcherHookAdapter{preMigrationSourceHandler: handler}
-
-	_, err := adapter.PreMigrationSource(context.Background(), &pb.PreMigrationSourceRequest{Vmi: []byte("not-valid-json{{{")})
-	if err == nil {
-		t.Fatal("expected error for invalid VMI JSON")
-	}
-
-	if !strings.Contains(err.Error(), "unmarshal VMI") {
-		t.Fatalf("expected VMI unmarshal error, got: %v", err)
+			if !strings.Contains(err.Error(), "unmarshal VMI") {
+				t.Fatalf("expected VMI unmarshal error, got: %v", err)
+			}
+		})
 	}
 }
 
@@ -961,25 +911,6 @@ func TestNodeHookAdapterUnregisteredHookPoint(t *testing.T) {
 	}
 }
 
-func TestNodeHookAdapterInvalidVMIJSON(t *testing.T) {
-	adapter := &nodeHookAdapter{handlers: map[NodeHookPoint]NodeHookHandler{
-		NodeHookPreVMStart: &recordingNodeHandler{},
-	}}
-
-	_, err := adapter.ExecuteNodeHook(context.Background(), &pb.ExecuteNodeHookRequest{
-		HookPoint:   string(NodeHookPreVMStart),
-		Vmi:         []byte("not-valid-json{{{"),
-		NodeContext: &pb.NodeContext{NodeName: "node-1"},
-	})
-	if err == nil {
-		t.Fatal("expected error for invalid VMI JSON")
-	}
-
-	if !strings.Contains(err.Error(), "unmarshal VMI") {
-		t.Fatalf("expected VMI unmarshal error, got: %v", err)
-	}
-}
-
 func TestNodeHookAdapterHandlerError(t *testing.T) {
 	handlerErr := fmt.Errorf("node handler broke")
 	adapter := &nodeHookAdapter{handlers: map[NodeHookPoint]NodeHookHandler{
@@ -1012,8 +943,7 @@ func (h *appendingGuestDefinitionHandler) GuestDefinition(_ context.Context, req
 }
 
 func TestServeWithEntrypointFiltersLauncherHooks(t *testing.T) {
-	tmpDir := t.TempDir()
-	launcherSock := filepath.Join(tmpDir, "launcher.sock")
+	launcherSock := filepath.Join(t.TempDir(), "launcher.sock")
 
 	handlerA := &appendingGuestDefinitionHandler{suffix: "-A"}
 	handlerB := &appendingGuestDefinitionHandler{suffix: "-B"}
@@ -1022,13 +952,9 @@ func TestServeWithEntrypointFiltersLauncherHooks(t *testing.T) {
 		WithLauncherHook(GuestDefinition(handlerA).WithEntrypoint("ep-a")).
 		WithLauncherHook(GuestDefinition(handlerB).WithEntrypoint("ep-b"))
 
-	stopCh := make(chan struct{})
-	errCh := make(chan error, 1)
-	go func() {
-		errCh <- p.Serve(withLauncherSocketPath(launcherSock), withStopCh(stopCh), withEntrypoint("ep-a"))
-	}()
+	stopCh, errCh := serveInBackground(t, p, serveOptions{launcherSocketPath: launcherSock, entrypoint: "ep-a"})
 
-	waitForSocket(t, launcherSock)
+	waitForSocket(t, launcherSock, errCh)
 
 	conn := dialSocket(t, launcherSock)
 	client := pb.NewLauncherHookServiceClient(conn)
@@ -1065,8 +991,7 @@ func TestServeWithEntrypointFiltersLauncherHooks(t *testing.T) {
 }
 
 func TestServeWithEntrypointFiltersNodeHooks(t *testing.T) {
-	tmpDir := t.TempDir()
-	nodeSock := filepath.Join(tmpDir, "node.sock")
+	nodeSock := filepath.Join(t.TempDir(), "node.sock")
 
 	handlerA := &recordingNodeHandler{}
 	handlerB := &recordingNodeHandler{}
@@ -1075,13 +1000,9 @@ func TestServeWithEntrypointFiltersNodeHooks(t *testing.T) {
 		WithNodeHook(NodeHookPreVMStart, NodeHandler(handlerA).WithEntrypoint("ep-a")).
 		WithNodeHook(NodeHookPostVMStop, NodeHandler(handlerB).WithEntrypoint("ep-b"))
 
-	stopCh := make(chan struct{})
-	errCh := make(chan error, 1)
-	go func() {
-		errCh <- p.Serve(withNodeSocketPath(nodeSock), withStopCh(stopCh), withEntrypoint("ep-a"))
-	}()
+	stopCh, errCh := serveInBackground(t, p, serveOptions{nodeSocketPath: nodeSock, entrypoint: "ep-a"})
 
-	waitForSocket(t, nodeSock)
+	waitForSocket(t, nodeSock, errCh)
 
 	conn := dialSocket(t, nodeSock)
 	client := pb.NewNodeHookServiceClient(conn)
@@ -1122,24 +1043,6 @@ func TestServeMixedEntrypointsWithoutFlagErrors(t *testing.T) {
 	}
 }
 
-func TestServeSingleEntrypointNoFlagOK(t *testing.T) {
-	tmpDir := t.TempDir()
-	launcherSock := filepath.Join(tmpDir, "launcher.sock")
-
-	p := New("test-plugin").WithLauncherHook(GuestDefinition(&stubGuestDefinitionHandler{}))
-
-	stopCh := make(chan struct{})
-	errCh := make(chan error, 1)
-	go func() {
-		errCh <- p.Serve(withLauncherSocketPath(launcherSock), withStopCh(stopCh))
-	}()
-
-	waitForSocket(t, launcherSock)
-
-	close(stopCh)
-	awaitServeStop(t, errCh)
-}
-
 func TestServeWithNoHooks(t *testing.T) {
 	p := New("no-hooks-plugin")
 
@@ -1156,7 +1059,7 @@ func TestServeWithNoHooks(t *testing.T) {
 func TestServeNonExistentEntrypointErrors(t *testing.T) {
 	p := New("test-plugin").WithNodeHook(NodeHookPreVMStart, NodeHandler(&stubNodeHandler{}))
 
-	err := p.Serve(withEntrypoint("non-existent"))
+	err := p.serve(serveOptions{entrypoint: "non-existent"})
 	if err == nil {
 		t.Fatal("expected error for non-existent entrypoint")
 	}
@@ -1180,21 +1083,16 @@ func TestServeCELOnlyPluginErrors(t *testing.T) {
 }
 
 func TestServeMixedSidecarAndCEL(t *testing.T) {
-	tmpDir := t.TempDir()
-	launcherSock := filepath.Join(tmpDir, "launcher.sock")
+	launcherSock := filepath.Join(t.TempDir(), "launcher.sock")
 
 	handler := &mutatingGuestDefinitionHandler{}
 	p := New("test-plugin").
 		WithLauncherHook(GuestDefinition(handler)).
 		WithLauncherHook(GuestDefinitionCEL("Domain{Name: 'test'}"))
 
-	stopCh := make(chan struct{})
-	errCh := make(chan error, 1)
-	go func() {
-		errCh <- p.Serve(withLauncherSocketPath(launcherSock), withStopCh(stopCh))
-	}()
+	stopCh, errCh := serveInBackground(t, p, serveOptions{launcherSocketPath: launcherSock})
 
-	waitForSocket(t, launcherSock)
+	waitForSocket(t, launcherSock, errCh)
 
 	conn := dialSocket(t, launcherSock)
 	client := pb.NewLauncherHookServiceClient(conn)
@@ -1240,10 +1138,10 @@ func TestServeWithSidecarArgsServesOnlyLauncherHooks(t *testing.T) {
 				WithLauncherHook(GuestDefinition(&stubGuestDefinitionHandler{}).WithEntrypoint(test.entrypoint)).
 				WithNodeHook(NodeHookPreVMStart, NodeHandler(&stubNodeHandler{}).WithEntrypoint(test.entrypoint))
 
-			stopCh := make(chan struct{})
-			errCh := serveWithArgs(t, plugin, plugin.sidecarArgs(plugin.resolveEntrypoint(test.entrypoint)), launcherSock, nodeSock, stopCh)
+			args := []string{"--entrypoint", plugin.resolveEntrypoint(test.entrypoint), "--role", roleSidecar}
+			stopCh, errCh := serveWithArgs(t, plugin, args, launcherSock, nodeSock)
 
-			waitForSocketWhileServing(t, launcherSock, errCh)
+			waitForSocket(t, launcherSock, errCh)
 
 			close(stopCh)
 			awaitServeStop(t, errCh)
@@ -1269,10 +1167,10 @@ func TestServeWithDaemonSetArgsServesOnlyNodeHooks(t *testing.T) {
 				WithLauncherHook(GuestDefinition(&stubGuestDefinitionHandler{}).WithEntrypoint(test.entrypoint)).
 				WithNodeHook(NodeHookPreVMStart, NodeHandler(&stubNodeHandler{}).WithEntrypoint(test.entrypoint))
 
-			stopCh := make(chan struct{})
-			errCh := serveWithArgs(t, plugin, plugin.daemonSetArgs(plugin.resolveEntrypoint(test.entrypoint)), launcherSock, nodeSock, stopCh)
+			args := []string{"--entrypoint", plugin.resolveEntrypoint(test.entrypoint), "--role", roleDaemonSet}
+			stopCh, errCh := serveWithArgs(t, plugin, args, launcherSock, nodeSock)
 
-			waitForSocketWhileServing(t, nodeSock, errCh)
+			waitForSocket(t, nodeSock, errCh)
 
 			close(stopCh)
 			awaitServeStop(t, errCh)
@@ -1290,10 +1188,9 @@ func TestServeWithDefaultEntrypointArgsAlongsideNamedEntrypoint(t *testing.T) {
 		launcherSock := filepath.Join(t.TempDir(), "launcher.sock")
 		nodeSock := filepath.Join(t.TempDir(), "node.sock")
 
-		stopCh := make(chan struct{})
-		errCh := serveWithArgs(t, plugin, plugin.sidecarArgs("test-plugin"), launcherSock, nodeSock, stopCh)
+		stopCh, errCh := serveWithArgs(t, plugin, []string{"--entrypoint", "test-plugin", "--role", roleSidecar}, launcherSock, nodeSock)
 
-		waitForSocketWhileServing(t, launcherSock, errCh)
+		waitForSocket(t, launcherSock, errCh)
 
 		close(stopCh)
 		awaitServeStop(t, errCh)
@@ -1303,10 +1200,9 @@ func TestServeWithDefaultEntrypointArgsAlongsideNamedEntrypoint(t *testing.T) {
 		launcherSock := filepath.Join(t.TempDir(), "launcher.sock")
 		nodeSock := filepath.Join(t.TempDir(), "node.sock")
 
-		stopCh := make(chan struct{})
-		errCh := serveWithArgs(t, plugin, plugin.daemonSetArgs("test-plugin"), launcherSock, nodeSock, stopCh)
+		stopCh, errCh := serveWithArgs(t, plugin, []string{"--entrypoint", "test-plugin", "--role", roleDaemonSet}, launcherSock, nodeSock)
 
-		waitForSocketWhileServing(t, nodeSock, errCh)
+		waitForSocket(t, nodeSock, errCh)
 
 		close(stopCh)
 		awaitServeStop(t, errCh)
@@ -1319,17 +1215,12 @@ func TestParseServeArgs(t *testing.T) {
 		t.Fatalf("parseServeArgs failed: %v", err)
 	}
 
-	options := &serveOptions{}
-	for _, opt := range serveOpts {
-		opt(options)
+	if serveOpts.entrypoint != "ep-a" {
+		t.Fatalf("expected entrypoint %q, got %q", "ep-a", serveOpts.entrypoint)
 	}
 
-	if options.entrypoint != "ep-a" {
-		t.Fatalf("expected entrypoint %q, got %q", "ep-a", options.entrypoint)
-	}
-
-	if options.role != roleSidecar {
-		t.Fatalf("expected role %q, got %q", roleSidecar, options.role)
+	if serveOpts.role != roleSidecar {
+		t.Fatalf("expected role %q, got %q", roleSidecar, serveOpts.role)
 	}
 }
 
@@ -1377,7 +1268,7 @@ func TestServeWithRoleWithoutMatchingHooksErrors(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			err := test.plugin.Serve(withRole(test.role))
+			err := test.plugin.serve(serveOptions{role: test.role})
 			if err == nil {
 				t.Fatalf("expected error when serving role %q without matching hooks", test.role)
 			}

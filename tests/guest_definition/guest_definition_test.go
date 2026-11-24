@@ -12,8 +12,7 @@ var _ = Describe("Guest Definition", func() {
 	It("should apply the sidecar GuestDefinition hook to the domain XML", func() {
 		ns := framework.TestContext.Namespace
 
-		p := newPlugin().WithNamespace(ns).WithImage(framework.TestContext.ContainerPrefix + "/guest_definition:latest")
-		framework.TestContext.DeployPlugin(p, ns)
+		framework.TestContext.DeploySuitePlugin(newPlugin(), ns, "guest_definition")
 
 		vmi := framework.TestContext.CreateVMI(ns)
 		framework.TestContext.WaitForVMIRunning(ns, vmi.Name)
@@ -27,8 +26,7 @@ var _ = Describe("Guest Definition", func() {
 	It("should inject the sidecar only into labelled virt-launcher pods", func() {
 		ns := framework.TestContext.Namespace
 
-		p := newGatedPlugin().WithNamespace(ns).WithImage(framework.TestContext.ContainerPrefix + "/guest_definition:latest")
-		framework.TestContext.DeployPlugin(p, ns)
+		framework.TestContext.DeploySuitePlugin(newGatedPlugin(), ns, "guest_definition")
 
 		labelled := framework.TestContext.CreateVMI(ns, framework.WithLabels(map[string]string{"sdk-sidecar-gate": "true"}))
 		framework.TestContext.WaitForVMIRunning(ns, labelled.Name)

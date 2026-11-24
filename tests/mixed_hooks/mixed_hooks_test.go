@@ -10,9 +10,7 @@ var _ = Describe("Mixed Hooks Plugin", func() {
 	It("should start a VMI with domain and node hooks on the default entrypoint", func() {
 		ns := framework.TestContext.Namespace
 
-		p := newPlugin().WithNamespace(ns).WithImage(framework.TestContext.ContainerPrefix + "/mixed_hooks:latest")
-
-		framework.TestContext.DeployPlugin(p, ns)
+		framework.TestContext.DeploySuitePlugin(newPlugin(), ns, "mixed_hooks")
 
 		framework.TestContext.WaitForDaemonSetReady(ns, "test-mixed-hooks")
 

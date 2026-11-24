@@ -64,10 +64,6 @@ func Int32(value int32) *pb.OptionalInt32 {
 // Strings returns a StringList that overrides a repeated string parameter with values.
 // Calling it with zero values is equivalent to RemoveStrings(): an empty list
 // removes the parameter rather than setting it to an empty value.
-//
-// For MigrateDisks, removing the list while the NonSharedDisk or NonSharedInc
-// flag is set makes libvirt migrate all non-shared disks; to migrate no
-// disks, clear the flags (NonSharedDisk | NonSharedInc in ClearFlags) instead.
 func Strings(values ...string) *pb.StringList {
 	return &pb.StringList{Values: values}
 }

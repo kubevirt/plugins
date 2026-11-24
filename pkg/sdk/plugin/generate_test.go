@@ -74,9 +74,11 @@ type testClusterRole struct {
 		Name string `yaml:"name"`
 	} `yaml:"metadata"`
 	Rules []struct {
-		APIGroups []string `yaml:"apiGroups"`
-		Resources []string `yaml:"resources"`
-		Verbs     []string `yaml:"verbs"`
+		APIGroups       []string `yaml:"apiGroups"`
+		Resources       []string `yaml:"resources"`
+		ResourceNames   []string `yaml:"resourceNames"`
+		NonResourceURLs []string `yaml:"nonResourceURLs"`
+		Verbs           []string `yaml:"verbs"`
 	} `yaml:"rules"`
 }
 
@@ -152,30 +154,37 @@ func setupSourceDir(t *testing.T) string {
 	return dir
 }
 
+// generatePlugin runs the generator for p and returns the source and output
+// directories it used.
+func generatePlugin(t *testing.T, p *Plugin) (sourceDir, outputDir string) {
+	t.Helper()
+
+	sourceDir = setupSourceDir(t)
+	outputDir = filepath.Join(t.TempDir(), "deploy")
+	if err := p.generate(outputDir, sourceDir); err != nil {
+		t.Fatal(err)
+	}
+
+	return sourceDir, outputDir
+}
+
 func readAndUnmarshal(t *testing.T, path string, v any) {
 	t.Helper()
 
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("failed to read %s: %v", path, err)
-	}
-
-	if err := yaml.Unmarshal(data, v); err != nil {
-		t.Fatalf("failed to unmarshal %s: %v\nContent:\n%s", path, err, string(data))
+	data := readFileContent(t, path)
+	if err := yaml.Unmarshal([]byte(data), v); err != nil {
+		t.Fatalf("failed to unmarshal %s: %v\nContent:\n%s", path, err, data)
 	}
 }
 
 func readPluginCR(t *testing.T, dir string) pluginv1alpha1.Plugin {
 	t.Helper()
 
-	data, err := os.ReadFile(findGeneratedFile(t, dir, "plugin.yaml"))
-	if err != nil {
-		t.Fatalf("failed to read plugin.yaml: %v", err)
-	}
+	data := readFileContent(t, findGeneratedFile(t, dir, "plugin.yaml"))
 
 	var cr pluginv1alpha1.Plugin
-	if err := sigsyaml.Unmarshal(data, &cr); err != nil {
-		t.Fatalf("failed to unmarshal plugin.yaml: %v\nContent:\n%s", err, string(data))
+	if err := sigsyaml.Unmarshal([]byte(data), &cr); err != nil {
+		t.Fatalf("failed to unmarshal plugin.yaml: %v\nContent:\n%s", err, data)
 	}
 
 	return cr
@@ -217,34 +226,32 @@ func readFileContent(t *testing.T, path string) string {
 func findGeneratedFile(t *testing.T, dir, suffix string) string {
 	t.Helper()
 
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		t.Fatalf("failed to read dir %s: %v", dir, err)
+	path, ok := generatedFile(dir, suffix)
+	if !ok {
+		t.Fatalf("no file with suffix %q found in %s (files: %v)", suffix, dir, listFileNames(dir))
 	}
 
-	for _, e := range entries {
-		if strings.HasSuffix(e.Name(), suffix) {
-			return filepath.Join(dir, e.Name())
-		}
-	}
-
-	t.Fatalf("no file with suffix %q found in %s (files: %v)", suffix, dir, listFileNames(dir))
-	return ""
+	return path
 }
 
 func generatedFileExists(dir, suffix string) bool {
+	_, ok := generatedFile(dir, suffix)
+	return ok
+}
+
+func generatedFile(dir, suffix string) (string, bool) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		return false
+		return "", false
 	}
 
 	for _, e := range entries {
 		if strings.HasSuffix(e.Name(), suffix) {
-			return true
+			return filepath.Join(dir, e.Name()), true
 		}
 	}
 
-	return false
+	return "", false
 }
 
 func listFileNames(dir string) []string {
@@ -288,13 +295,8 @@ func mustParseCEL(t *testing.T, expression string) {
 // Tests
 
 func TestGeneratePluginCRNodeHookOnly(t *testing.T) {
-	sourceDir := setupSourceDir(t)
-	outputDir := filepath.Join(t.TempDir(), "deploy")
-
 	p := New("test-plugin").WithNodeHook(NodeHookPreVMStart, NodeHandler(&stubNodeHandler{}))
-	if err := p.generate(outputDir, sourceDir); err != nil {
-		t.Fatal(err)
-	}
+	_, outputDir := generatePlugin(t, p)
 
 	cr := readPluginCR(t, outputDir)
 
@@ -328,13 +330,8 @@ func TestGeneratePluginCRNodeHookOnly(t *testing.T) {
 }
 
 func TestGeneratePluginCRLauncherHookOnly(t *testing.T) {
-	sourceDir := setupSourceDir(t)
-	outputDir := filepath.Join(t.TempDir(), "deploy")
-
 	p := New("test-plugin").WithLauncherHook(GuestDefinition(&stubGuestDefinitionHandler{}))
-	if err := p.generate(outputDir, sourceDir); err != nil {
-		t.Fatal(err)
-	}
+	_, outputDir := generatePlugin(t, p)
 
 	cr := readPluginCR(t, outputDir)
 
@@ -363,15 +360,10 @@ func TestGeneratePluginCRLauncherHookOnly(t *testing.T) {
 }
 
 func TestGeneratePluginCRBothHookKinds(t *testing.T) {
-	sourceDir := setupSourceDir(t)
-	outputDir := filepath.Join(t.TempDir(), "deploy")
-
 	p := New("test-plugin").
 		WithLauncherHook(GuestDefinition(&stubGuestDefinitionHandler{})).
 		WithNodeHook(NodeHookPreVMStart, NodeHandler(&stubNodeHandler{}))
-	if err := p.generate(outputDir, sourceDir); err != nil {
-		t.Fatal(err)
-	}
+	_, outputDir := generatePlugin(t, p)
 
 	cr := readPluginCR(t, outputDir)
 
@@ -385,15 +377,10 @@ func TestGeneratePluginCRBothHookKinds(t *testing.T) {
 }
 
 func TestGeneratePluginCRWithCondition(t *testing.T) {
-	sourceDir := setupSourceDir(t)
-	outputDir := filepath.Join(t.TempDir(), "deploy")
-
 	p := New("test-plugin").
 		WithNodeHook(NodeHookPreVMStart, NodeHandler(&stubNodeHandler{})).
 		WithCondition("vmi.Name == 'test'")
-	if err := p.generate(outputDir, sourceDir); err != nil {
-		t.Fatal(err)
-	}
+	_, outputDir := generatePlugin(t, p)
 
 	cr := readPluginCR(t, outputDir)
 
@@ -403,9 +390,6 @@ func TestGeneratePluginCRWithCondition(t *testing.T) {
 }
 
 func TestGeneratePluginCRWithPerHookSettings(t *testing.T) {
-	sourceDir := setupSourceDir(t)
-	outputDir := filepath.Join(t.TempDir(), "deploy")
-
 	timeout := 30 * time.Second
 	p := New("test-plugin").WithNodeHook(NodeHookPreVMStart,
 		NodeHandler(&stubNodeHandler{}).
@@ -413,9 +397,7 @@ func TestGeneratePluginCRWithPerHookSettings(t *testing.T) {
 			WithFailureStrategy(Ignore).
 			WithTimeout(timeout),
 	)
-	if err := p.generate(outputDir, sourceDir); err != nil {
-		t.Fatal(err)
-	}
+	_, outputDir := generatePlugin(t, p)
 
 	cr := readPluginCR(t, outputDir)
 
@@ -439,9 +421,6 @@ func TestGeneratePluginCRWithPerHookSettings(t *testing.T) {
 }
 
 func TestGeneratePluginCRLauncherHookPerHookSettings(t *testing.T) {
-	sourceDir := setupSourceDir(t)
-	outputDir := filepath.Join(t.TempDir(), "deploy")
-
 	timeout := 45 * time.Second
 	p := New("test-plugin").WithLauncherHook(
 		GuestDefinition(&stubGuestDefinitionHandler{}).
@@ -449,9 +428,7 @@ func TestGeneratePluginCRLauncherHookPerHookSettings(t *testing.T) {
 			WithFailureStrategy(Ignore).
 			WithTimeout(timeout),
 	)
-	if err := p.generate(outputDir, sourceDir); err != nil {
-		t.Fatal(err)
-	}
+	_, outputDir := generatePlugin(t, p)
 
 	cr := readPluginCR(t, outputDir)
 
@@ -475,13 +452,8 @@ func TestGeneratePluginCRLauncherHookPerHookSettings(t *testing.T) {
 }
 
 func TestGeneratePluginCRRendersOnVMStop(t *testing.T) {
-	sourceDir := setupSourceDir(t)
-	outputDir := filepath.Join(t.TempDir(), "deploy")
-
 	p := New("test-plugin").WithNodeHook(NodeHookOnVMStop, NodeHandler(&stubNodeHandler{}))
-	if err := p.generate(outputDir, sourceDir); err != nil {
-		t.Fatal(err)
-	}
+	_, outputDir := generatePlugin(t, p)
 
 	cr := readPluginCR(t, outputDir)
 
@@ -495,16 +467,11 @@ func TestGeneratePluginCRRendersOnVMStop(t *testing.T) {
 }
 
 func TestGeneratePluginCRKeepsPluginFailureStrategyAtPluginLevel(t *testing.T) {
-	sourceDir := setupSourceDir(t)
-	outputDir := filepath.Join(t.TempDir(), "deploy")
-
 	p := New("test-plugin").
 		WithFailureStrategy(Ignore).
 		WithNodeHook(NodeHookPreVMStart, NodeHandler(&stubNodeHandler{})).
 		WithNodeHook(NodeHookPostVMStop, NodeHandler(&stubNodeHandler{}).WithFailureStrategy(Fail))
-	if err := p.generate(outputDir, sourceDir); err != nil {
-		t.Fatal(err)
-	}
+	_, outputDir := generatePlugin(t, p)
 
 	cr := readPluginCR(t, outputDir)
 
@@ -526,15 +493,10 @@ func TestGeneratePluginCRKeepsPluginFailureStrategyAtPluginLevel(t *testing.T) {
 }
 
 func TestGeneratePluginCRKeepsPluginFailureStrategyOutOfLauncherHooks(t *testing.T) {
-	sourceDir := setupSourceDir(t)
-	outputDir := filepath.Join(t.TempDir(), "deploy")
-
 	p := New("test-plugin").
 		WithFailureStrategy(Ignore).
 		WithLauncherHook(GuestDefinition(&stubGuestDefinitionHandler{}))
-	if err := p.generate(outputDir, sourceDir); err != nil {
-		t.Fatal(err)
-	}
+	_, outputDir := generatePlugin(t, p)
 
 	cr := readPluginCR(t, outputDir)
 
@@ -551,34 +513,9 @@ func TestGeneratePluginCRKeepsPluginFailureStrategyOutOfLauncherHooks(t *testing
 	}
 }
 
-func TestGeneratePluginCRNodeHookWithoutAnyFailureStrategy(t *testing.T) {
-	sourceDir := setupSourceDir(t)
-	outputDir := filepath.Join(t.TempDir(), "deploy")
-
-	p := New("test-plugin").WithNodeHook(NodeHookPreVMStart, NodeHandler(&stubNodeHandler{}))
-	if err := p.generate(outputDir, sourceDir); err != nil {
-		t.Fatal(err)
-	}
-
-	cr := readPluginCR(t, outputDir)
-
-	if len(cr.Spec.NodeHooks) != 1 {
-		t.Fatalf("expected 1 nodeHook, got %d", len(cr.Spec.NodeHooks))
-	}
-
-	if cr.Spec.NodeHooks[0].FailureStrategy != "" {
-		t.Fatalf("expected no failureStrategy on the node hook, got %q", cr.Spec.NodeHooks[0].FailureStrategy)
-	}
-}
-
 func TestGeneratePluginCRHasNoCreationTimestampOrStatus(t *testing.T) {
-	sourceDir := setupSourceDir(t)
-	outputDir := filepath.Join(t.TempDir(), "deploy")
-
 	p := New("test-plugin").WithLauncherHook(GuestDefinition(&stubGuestDefinitionHandler{}))
-	if err := p.generate(outputDir, sourceDir); err != nil {
-		t.Fatal(err)
-	}
+	_, outputDir := generatePlugin(t, p)
 
 	content := readFileContent(t, findGeneratedFile(t, outputDir, "plugin.yaml"))
 
@@ -592,17 +529,12 @@ func TestGeneratePluginCRHasNoCreationTimestampOrStatus(t *testing.T) {
 }
 
 func TestGeneratePluginCRLauncherHooksInDeclarationOrder(t *testing.T) {
-	sourceDir := setupSourceDir(t)
-	outputDir := filepath.Join(t.TempDir(), "deploy")
-
 	p := New("test-plugin").
 		WithLauncherHook(GuestDefinitionCEL("Domain{Name: 'cel-first'}")).
 		WithLauncherHook(GuestDefinition(&stubGuestDefinitionHandler{})).
 		WithLauncherHook(PreBoot(&stubPreBootHandler{})).
 		WithLauncherHook(GuestDefinitionCEL("Domain{Name: 'cel-last'}"))
-	if err := p.generate(outputDir, sourceDir); err != nil {
-		t.Fatal(err)
-	}
+	_, outputDir := generatePlugin(t, p)
 
 	cr := readPluginCR(t, outputDir)
 
@@ -627,14 +559,9 @@ func TestGeneratePluginCRLauncherHooksInDeclarationOrder(t *testing.T) {
 	}
 }
 
-func TestGeneratePluginCRCELHookPoint(t *testing.T) {
-	sourceDir := setupSourceDir(t)
-	outputDir := filepath.Join(t.TempDir(), "deploy")
-
+func TestGeneratePluginCRCELHook(t *testing.T) {
 	p := New("test-plugin").WithLauncherHook(GuestDefinitionCEL("Domain{Name: 'test'}"))
-	if err := p.generate(outputDir, sourceDir); err != nil {
-		t.Fatal(err)
-	}
+	_, outputDir := generatePlugin(t, p)
 
 	cr := readPluginCR(t, outputDir)
 
@@ -657,19 +584,18 @@ func TestGeneratePluginCRCELHookPoint(t *testing.T) {
 	if cr.Spec.LauncherHooks[0].Timeout != nil {
 		t.Fatal("expected no timeout on a CEL hook")
 	}
+
+	if len(cr.Spec.MutatingAdmissionPolicies) != 0 {
+		t.Fatalf("expected no admission references without sidecars, got %v", cr.Spec.MutatingAdmissionPolicies)
+	}
 }
 
 func TestGeneratePluginCRSharedSocketPerEntrypoint(t *testing.T) {
-	sourceDir := setupSourceDir(t)
-	outputDir := filepath.Join(t.TempDir(), "deploy")
-
 	timeout := 30 * time.Second
 	p := New("test-plugin").
 		WithLauncherHook(GuestDefinition(&stubGuestDefinitionHandler{}).WithEntrypoint("ep-a")).
 		WithLauncherHook(PreBoot(&stubPreBootHandler{}).WithEntrypoint("ep-a").WithTimeout(timeout))
-	if err := p.generate(outputDir, sourceDir); err != nil {
-		t.Fatal(err)
-	}
+	_, outputDir := generatePlugin(t, p)
 
 	cr := readPluginCR(t, outputDir)
 
@@ -691,16 +617,11 @@ func TestGeneratePluginCRSharedSocketPerEntrypoint(t *testing.T) {
 }
 
 func TestGeneratePluginCRMutatingAdmissionPolicies(t *testing.T) {
-	sourceDir := setupSourceDir(t)
-	outputDir := filepath.Join(t.TempDir(), "deploy")
-
 	p := New("test-plugin").
 		WithLauncherHook(GuestDefinition(&stubGuestDefinitionHandler{})).
 		WithLauncherHook(PreBoot(&stubPreBootHandler{}).WithEntrypoint("ep-a")).
 		WithLauncherHook(GuestDefinitionCEL("Domain{Name: 'test'}"))
-	if err := p.generate(outputDir, sourceDir); err != nil {
-		t.Fatal(err)
-	}
+	_, outputDir := generatePlugin(t, p)
 
 	cr := readPluginCR(t, outputDir)
 
@@ -718,13 +639,8 @@ func TestGeneratePluginCRMutatingAdmissionPolicies(t *testing.T) {
 }
 
 func TestGenerateDaemonSet(t *testing.T) {
-	sourceDir := setupSourceDir(t)
-	outputDir := filepath.Join(t.TempDir(), "deploy")
-
 	p := New("test-plugin").WithNodeHook(NodeHookPreVMStart, NodeHandler(&stubNodeHandler{}))
-	if err := p.generate(outputDir, sourceDir); err != nil {
-		t.Fatal(err)
-	}
+	_, outputDir := generatePlugin(t, p)
 
 	var ds testDaemonSet
 	readAndUnmarshal(t, findGeneratedFile(t, outputDir, "daemonset.yaml"), &ds)
@@ -759,8 +675,8 @@ func TestGenerateDaemonSet(t *testing.T) {
 		t.Fatalf("expected container name test-plugin, got %q", container.Name)
 	}
 
-	if !strings.Contains(container.Image, "test-plugin") {
-		t.Fatalf("expected image to contain plugin name, got %q", container.Image)
+	if container.Image != "quay.io/myorg/test-plugin:latest" {
+		t.Fatalf("expected image quay.io/myorg/test-plugin:latest, got %q", container.Image)
 	}
 
 	if len(container.VolumeMounts) == 0 {
@@ -781,9 +697,6 @@ func TestGenerateDaemonSet(t *testing.T) {
 }
 
 func TestGenerateRBACWhenRulesProvided(t *testing.T) {
-	sourceDir := setupSourceDir(t)
-	outputDir := filepath.Join(t.TempDir(), "deploy")
-
 	rules := []rbacv1.PolicyRule{{
 		APIGroups: []string{""},
 		Resources: []string{"pods"},
@@ -793,9 +706,7 @@ func TestGenerateRBACWhenRulesProvided(t *testing.T) {
 	p := New("test-plugin").
 		WithNodeHook(NodeHookPreVMStart, NodeHandler(&stubNodeHandler{})).
 		WithRBACRules(rules)
-	if err := p.generate(outputDir, sourceDir); err != nil {
-		t.Fatal(err)
-	}
+	_, outputDir := generatePlugin(t, p)
 
 	rbacFile := findGeneratedFile(t, outputDir, "rbac.yaml")
 	content := readFileContent(t, rbacFile)
@@ -861,9 +772,6 @@ func TestGenerateRBACWhenRulesProvided(t *testing.T) {
 }
 
 func TestGenerateRBACWithCustomNamespace(t *testing.T) {
-	sourceDir := setupSourceDir(t)
-	outputDir := filepath.Join(t.TempDir(), "deploy")
-
 	rules := []rbacv1.PolicyRule{{
 		APIGroups: []string{""},
 		Resources: []string{"pods"},
@@ -874,9 +782,7 @@ func TestGenerateRBACWithCustomNamespace(t *testing.T) {
 		WithNodeHook(NodeHookPreVMStart, NodeHandler(&stubNodeHandler{})).
 		WithRBACRules(rules).
 		WithNamespace("kube-system")
-	if err := p.generate(outputDir, sourceDir); err != nil {
-		t.Fatal(err)
-	}
+	_, outputDir := generatePlugin(t, p)
 
 	rbacFile := findGeneratedFile(t, outputDir, "rbac.yaml")
 	content := readFileContent(t, rbacFile)
@@ -911,44 +817,58 @@ func TestGenerateRBACWithCustomNamespace(t *testing.T) {
 	}
 }
 
-func TestGenerateRBACWithResourceNames(t *testing.T) {
-	sourceDir := setupSourceDir(t)
-	outputDir := filepath.Join(t.TempDir(), "deploy")
-
-	rules := []rbacv1.PolicyRule{{
-		APIGroups:     []string{""},
-		Resources:     []string{"configmaps"},
-		ResourceNames: []string{"my-config"},
-		Verbs:         []string{"get"},
-	}}
-
-	p := New("test-plugin").
-		WithNodeHook(NodeHookPreVMStart, NodeHandler(&stubNodeHandler{})).
-		WithRBACRules(rules)
-	if err := p.generate(outputDir, sourceDir); err != nil {
-		t.Fatal(err)
+func TestGenerateRBACWithResourceNamesAndNonResourceURLs(t *testing.T) {
+	tests := []struct {
+		name string
+		rule rbacv1.PolicyRule
+	}{
+		{"resource names", rbacv1.PolicyRule{
+			APIGroups:     []string{""},
+			Resources:     []string{"configmaps"},
+			ResourceNames: []string{"my-config"},
+			Verbs:         []string{"get"},
+		}},
+		{"non-resource URLs", rbacv1.PolicyRule{
+			NonResourceURLs: []string{"/healthz", "/metrics"},
+			Verbs:           []string{"get"},
+		}},
 	}
 
-	rbacFile := findGeneratedFile(t, outputDir, "rbac.yaml")
-	content := readFileContent(t, rbacFile)
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			p := New("test-plugin").
+				WithNodeHook(NodeHookPreVMStart, NodeHandler(&stubNodeHandler{})).
+				WithRBACRules([]rbacv1.PolicyRule{test.rule})
+			_, outputDir := generatePlugin(t, p)
 
-	if !strings.Contains(content, "resourceNames") {
-		t.Fatalf("expected rbac.yaml to contain resourceNames, got:\n%s", content)
-	}
+			docs := splitYAMLDocuments(readFileContent(t, findGeneratedFile(t, outputDir, "rbac.yaml")))
+			if len(docs) != 3 {
+				t.Fatalf("expected 3 YAML documents in rbac.yaml, got %d", len(docs))
+			}
 
-	if !strings.Contains(content, "my-config") {
-		t.Fatalf("expected rbac.yaml to contain my-config, got:\n%s", content)
+			var cr testClusterRole
+			if err := yaml.Unmarshal([]byte(docs[1]), &cr); err != nil {
+				t.Fatalf("unmarshal ClusterRole: %v", err)
+			}
+
+			if len(cr.Rules) != 1 {
+				t.Fatalf("expected 1 rule, got %d", len(cr.Rules))
+			}
+
+			if !slices.Equal(cr.Rules[0].ResourceNames, test.rule.ResourceNames) {
+				t.Fatalf("expected resourceNames %v, got %v", test.rule.ResourceNames, cr.Rules[0].ResourceNames)
+			}
+
+			if !slices.Equal(cr.Rules[0].NonResourceURLs, test.rule.NonResourceURLs) {
+				t.Fatalf("expected nonResourceURLs %v, got %v", test.rule.NonResourceURLs, cr.Rules[0].NonResourceURLs)
+			}
+		})
 	}
 }
 
 func TestGenerateNoRBACWhenNoRules(t *testing.T) {
-	sourceDir := setupSourceDir(t)
-	outputDir := filepath.Join(t.TempDir(), "deploy")
-
 	p := New("test-plugin").WithNodeHook(NodeHookPreVMStart, NodeHandler(&stubNodeHandler{}))
-	if err := p.generate(outputDir, sourceDir); err != nil {
-		t.Fatal(err)
-	}
+	_, outputDir := generatePlugin(t, p)
 
 	if generatedFileExists(outputDir, "rbac.yaml") {
 		t.Fatal("expected no rbac.yaml when no RBAC rules provided")
@@ -956,9 +876,6 @@ func TestGenerateNoRBACWhenNoRules(t *testing.T) {
 }
 
 func TestGenerateNoDaemonSetForLauncherOnlyPlugin(t *testing.T) {
-	sourceDir := setupSourceDir(t)
-	outputDir := filepath.Join(t.TempDir(), "deploy")
-
 	rules := []rbacv1.PolicyRule{{
 		APIGroups: []string{""},
 		Resources: []string{"pods"},
@@ -968,9 +885,7 @@ func TestGenerateNoDaemonSetForLauncherOnlyPlugin(t *testing.T) {
 	p := New("test-plugin").
 		WithLauncherHook(GuestDefinition(&stubGuestDefinitionHandler{})).
 		WithRBACRules(rules)
-	if err := p.generate(outputDir, sourceDir); err != nil {
-		t.Fatal(err)
-	}
+	_, outputDir := generatePlugin(t, p)
 
 	if generatedFileExists(outputDir, "daemonset.yaml") {
 		t.Fatalf("expected no daemonset.yaml for a launcher-only plugin, files: %v", listFileNames(outputDir))
@@ -1001,13 +916,8 @@ func TestGenerateNoDaemonSetForLauncherOnlyPlugin(t *testing.T) {
 }
 
 func TestGenerateMAP(t *testing.T) {
-	sourceDir := setupSourceDir(t)
-	outputDir := filepath.Join(t.TempDir(), "deploy")
-
 	p := New("test-plugin").WithLauncherHook(GuestDefinition(&stubGuestDefinitionHandler{}))
-	if err := p.generate(outputDir, sourceDir); err != nil {
-		t.Fatal(err)
-	}
+	_, outputDir := generatePlugin(t, p)
 
 	var m testMAP
 	readAndUnmarshal(t, findGeneratedFile(t, outputDir, "mutating-admission-policy.yaml"), &m)
@@ -1090,13 +1000,8 @@ func TestGenerateMAP(t *testing.T) {
 }
 
 func TestGenerateMAPSidecarSecurityContext(t *testing.T) {
-	sourceDir := setupSourceDir(t)
-	outputDir := filepath.Join(t.TempDir(), "deploy")
-
 	p := New("test-plugin").WithLauncherHook(GuestDefinition(&stubGuestDefinitionHandler{}))
-	if err := p.generate(outputDir, sourceDir); err != nil {
-		t.Fatal(err)
-	}
+	_, outputDir := generatePlugin(t, p)
 
 	var m testMAP
 	readAndUnmarshal(t, findGeneratedFile(t, outputDir, "mutating-admission-policy.yaml"), &m)
@@ -1126,15 +1031,10 @@ func TestGenerateMAPSidecarSecurityContext(t *testing.T) {
 }
 
 func TestGenerateMAPWithImagePullPolicy(t *testing.T) {
-	sourceDir := setupSourceDir(t)
-	outputDir := filepath.Join(t.TempDir(), "deploy")
-
 	p := New("test-plugin").
 		WithLauncherHook(GuestDefinition(&stubGuestDefinitionHandler{})).
 		WithImagePullPolicy("Always")
-	if err := p.generate(outputDir, sourceDir); err != nil {
-		t.Fatal(err)
-	}
+	_, outputDir := generatePlugin(t, p)
 
 	var m testMAP
 	readAndUnmarshal(t, findGeneratedFile(t, outputDir, "mutating-admission-policy.yaml"), &m)
@@ -1148,15 +1048,10 @@ func TestGenerateMAPWithImagePullPolicy(t *testing.T) {
 }
 
 func TestGenerateMAPMountsEphemeralDisksForPreBoot(t *testing.T) {
-	sourceDir := setupSourceDir(t)
-	outputDir := filepath.Join(t.TempDir(), "deploy")
-
 	p := New("test-plugin").
 		WithLauncherHook(GuestDefinition(&stubGuestDefinitionHandler{})).
 		WithLauncherHook(PreBoot(&stubPreBootHandler{}).WithEntrypoint("ep-preboot"))
-	if err := p.generate(outputDir, sourceDir); err != nil {
-		t.Fatal(err)
-	}
+	_, outputDir := generatePlugin(t, p)
 
 	var guestDefinitionMAP testMAP
 	readAndUnmarshal(t, findGeneratedFile(t, outputDir, "mutating-admission-policy.yaml"), &guestDefinitionMAP)
@@ -1179,15 +1074,10 @@ func TestGenerateMAPMountsEphemeralDisksForPreBoot(t *testing.T) {
 }
 
 func TestGenerateMAPWithSidecarPodLabels(t *testing.T) {
-	sourceDir := setupSourceDir(t)
-	outputDir := filepath.Join(t.TempDir(), "deploy")
-
 	p := New("test-plugin").
 		WithLauncherHook(GuestDefinition(&stubGuestDefinitionHandler{})).
 		WithSidecarPodLabels(map[string]string{"zeta": "1", "alpha": "2"})
-	if err := p.generate(outputDir, sourceDir); err != nil {
-		t.Fatal(err)
-	}
+	_, outputDir := generatePlugin(t, p)
 
 	var m testMAP
 	readAndUnmarshal(t, findGeneratedFile(t, outputDir, "mutating-admission-policy.yaml"), &m)
@@ -1217,18 +1107,13 @@ func TestGenerateMAPWithSidecarPodLabels(t *testing.T) {
 }
 
 func TestGenerateMAPWithSidecarResources(t *testing.T) {
-	sourceDir := setupSourceDir(t)
-	outputDir := filepath.Join(t.TempDir(), "deploy")
-
 	p := New("test-plugin").
 		WithLauncherHook(GuestDefinition(&stubGuestDefinitionHandler{})).
 		WithSidecarResources(corev1.ResourceRequirements{
 			Requests: corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("64Mi"), corev1.ResourceCPU: resource.MustParse("50m")},
 			Limits:   corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("500m")},
 		})
-	if err := p.generate(outputDir, sourceDir); err != nil {
-		t.Fatal(err)
-	}
+	_, outputDir := generatePlugin(t, p)
 
 	var m testMAP
 	readAndUnmarshal(t, findGeneratedFile(t, outputDir, "mutating-admission-policy.yaml"), &m)
@@ -1250,13 +1135,8 @@ func TestGenerateMAPWithSidecarResources(t *testing.T) {
 }
 
 func TestGenerateMAPBinding(t *testing.T) {
-	sourceDir := setupSourceDir(t)
-	outputDir := filepath.Join(t.TempDir(), "deploy")
-
 	p := New("test-plugin").WithLauncherHook(GuestDefinition(&stubGuestDefinitionHandler{}))
-	if err := p.generate(outputDir, sourceDir); err != nil {
-		t.Fatal(err)
-	}
+	_, outputDir := generatePlugin(t, p)
 
 	var mb testMAPBinding
 	readAndUnmarshal(t, findGeneratedFile(t, outputDir, "mutating-admission-policy-binding.yaml"), &mb)
@@ -1271,13 +1151,8 @@ func TestGenerateMAPBinding(t *testing.T) {
 }
 
 func TestGenerateDockerfile(t *testing.T) {
-	sourceDir := setupSourceDir(t)
-	outputDir := filepath.Join(t.TempDir(), "deploy")
-
 	p := New("test-plugin").WithNodeHook(NodeHookPreVMStart, NodeHandler(&stubNodeHandler{}))
-	if err := p.generate(outputDir, sourceDir); err != nil {
-		t.Fatal(err)
-	}
+	sourceDir, _ := generatePlugin(t, p)
 
 	content := readFileContent(t, filepath.Join(sourceDir, "Dockerfile"))
 
@@ -1291,13 +1166,8 @@ func TestGenerateDockerfile(t *testing.T) {
 }
 
 func TestGenerateMakefile(t *testing.T) {
-	sourceDir := setupSourceDir(t)
-	outputDir := filepath.Join(t.TempDir(), "deploy")
-
 	p := New("test-plugin").WithNodeHook(NodeHookPreVMStart, NodeHandler(&stubNodeHandler{}))
-	if err := p.generate(outputDir, sourceDir); err != nil {
-		t.Fatal(err)
-	}
+	sourceDir, _ := generatePlugin(t, p)
 
 	content := readFileContent(t, filepath.Join(sourceDir, "Makefile"))
 
@@ -1326,6 +1196,43 @@ func TestGenerateMakefile(t *testing.T) {
 	}
 }
 
+func TestGenerateMakefilePushesManifestImage(t *testing.T) {
+	tests := []struct {
+		name  string
+		image string
+	}{
+		{name: "default image"},
+		{name: "custom image", image: "example.com/myorg/test-plugin:v1.2.3"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			p := New("test-plugin").
+				WithLauncherHook(GuestDefinition(&stubGuestDefinitionHandler{})).
+				WithNodeHook(NodeHookPreVMStart, NodeHandler(&stubNodeHandler{}))
+			if test.image != "" {
+				p = p.WithImage(test.image)
+			}
+			sourceDir, outputDir := generatePlugin(t, p)
+
+			var ds testDaemonSet
+			readAndUnmarshal(t, findGeneratedFile(t, outputDir, "daemonset.yaml"), &ds)
+			image := ds.Spec.Template.Spec.Containers[0].Image
+
+			mapContent := readFileContent(t, findGeneratedFile(t, outputDir, "mutating-admission-policy.yaml"))
+			if !strings.Contains(mapContent, "image: \""+image+"\"") {
+				t.Fatalf("expected MAP to reference image %q, got:\n%s", image, mapContent)
+			}
+
+			makefile := readFileContent(t, filepath.Join(sourceDir, "Makefile"))
+			expected := "IMAGE = " + image
+			if !strings.Contains(makefile, expected) {
+				t.Fatalf("expected Makefile to push the manifest image via %q, got:\n%s", expected, makefile)
+			}
+		})
+	}
+}
+
 func TestBuilderGoVersion(t *testing.T) {
 	tests := []struct {
 		goDirective string
@@ -1345,6 +1252,27 @@ func TestBuilderGoVersion(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestGenerate(t *testing.T) {
+	// The public entrypoint uses the process working directory as the
+	// source dir: Dockerfile and Makefile land next to go.mod, manifests
+	// under the output dir.
+	t.Chdir(setupSourceDir(t))
+
+	p := New("test-plugin").WithNodeHook(NodeHookPreVMStart, NodeHandler(&stubNodeHandler{}))
+	if err := p.Generate("deploy"); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, name := range []string{"Dockerfile", "Makefile"} {
+		if _, err := os.Stat(name); os.IsNotExist(err) {
+			t.Fatalf("expected %s in the working directory", name)
+		}
+	}
+
+	findGeneratedFile(t, "deploy", "plugin.yaml")
+	findGeneratedFile(t, "deploy", "daemonset.yaml")
 }
 
 func TestGenerateCreatesOutputDir(t *testing.T) {
@@ -1371,9 +1299,6 @@ func TestGenerateCreatesOutputDir(t *testing.T) {
 }
 
 func TestGenerateFileNumbering(t *testing.T) {
-	sourceDir := setupSourceDir(t)
-	outputDir := filepath.Join(t.TempDir(), "deploy")
-
 	rules := []rbacv1.PolicyRule{{
 		APIGroups: []string{""},
 		Resources: []string{"pods"},
@@ -1384,9 +1309,7 @@ func TestGenerateFileNumbering(t *testing.T) {
 		WithLauncherHook(GuestDefinition(&stubGuestDefinitionHandler{})).
 		WithNodeHook(NodeHookPreVMStart, NodeHandler(&stubNodeHandler{})).
 		WithRBACRules(rules)
-	if err := p.generate(outputDir, sourceDir); err != nil {
-		t.Fatal(err)
-	}
+	sourceDir, outputDir := generatePlugin(t, p)
 
 	expectedYAML := []string{
 		"01-rbac.yaml",
@@ -1420,9 +1343,7 @@ func TestGenerateWithNoHooks(t *testing.T) {
 	sourceDir := setupSourceDir(t)
 	outputDir := filepath.Join(t.TempDir(), "deploy")
 
-	p := New("empty-plugin")
-
-	err := p.generate(outputDir, sourceDir)
+	err := New("empty-plugin").generate(outputDir, sourceDir)
 	if err == nil {
 		t.Fatal("expected error when generating with no hooks")
 	}
@@ -1461,48 +1382,11 @@ func TestReadGoVersionMissingGoLine(t *testing.T) {
 	}
 }
 
-func TestGenerateRBACWithNonResourceURLs(t *testing.T) {
-	sourceDir := setupSourceDir(t)
-	outputDir := filepath.Join(t.TempDir(), "deploy")
-
-	rules := []rbacv1.PolicyRule{{
-		NonResourceURLs: []string{"/healthz", "/metrics"},
-		Verbs:           []string{"get"},
-	}}
-
-	p := New("test-plugin").
-		WithNodeHook(NodeHookPreVMStart, NodeHandler(&stubNodeHandler{})).
-		WithRBACRules(rules)
-	if err := p.generate(outputDir, sourceDir); err != nil {
-		t.Fatal(err)
-	}
-
-	rbacFile := findGeneratedFile(t, outputDir, "rbac.yaml")
-	content := readFileContent(t, rbacFile)
-
-	if !strings.Contains(content, "nonResourceURLs") {
-		t.Fatalf("expected rbac.yaml to contain nonResourceURLs, got:\n%s", content)
-	}
-
-	if !strings.Contains(content, "/healthz") {
-		t.Fatalf("expected rbac.yaml to contain /healthz, got:\n%s", content)
-	}
-
-	if !strings.Contains(content, "/metrics") {
-		t.Fatalf("expected rbac.yaml to contain /metrics, got:\n%s", content)
-	}
-}
-
 func TestGenerateMultiEntrypointDaemonSets(t *testing.T) {
-	sourceDir := setupSourceDir(t)
-	outputDir := filepath.Join(t.TempDir(), "deploy")
-
 	p := New("test-plugin").
 		WithNodeHook(NodeHookPreVMStart, NodeHandler(&stubNodeHandler{}).WithEntrypoint("ep-a")).
 		WithNodeHook(NodeHookPostVMStop, NodeHandler(&stubNodeHandler{}).WithEntrypoint("ep-b"))
-	if err := p.generate(outputDir, sourceDir); err != nil {
-		t.Fatal(err)
-	}
+	_, outputDir := generatePlugin(t, p)
 
 	var dsA testDaemonSet
 	readAndUnmarshal(t, findGeneratedFile(t, outputDir, "ep-a-daemonset.yaml"), &dsA)
@@ -1520,15 +1404,10 @@ func TestGenerateMultiEntrypointDaemonSets(t *testing.T) {
 }
 
 func TestGenerateMultiEntrypointMAPs(t *testing.T) {
-	sourceDir := setupSourceDir(t)
-	outputDir := filepath.Join(t.TempDir(), "deploy")
-
 	p := New("test-plugin").
 		WithLauncherHook(GuestDefinition(&stubGuestDefinitionHandler{}).WithEntrypoint("ep-a")).
 		WithLauncherHook(GuestDefinition(&stubGuestDefinitionHandler{}).WithEntrypoint("ep-b"))
-	if err := p.generate(outputDir, sourceDir); err != nil {
-		t.Fatal(err)
-	}
+	_, outputDir := generatePlugin(t, p)
 
 	var mapA testMAP
 	readAndUnmarshal(t, findGeneratedFile(t, outputDir, "ep-a-mutating-admission-policy.yaml"), &mapA)
@@ -1560,16 +1439,11 @@ func TestGenerateMultiEntrypointMAPs(t *testing.T) {
 }
 
 func TestGenerateMultiEntrypointPluginCR(t *testing.T) {
-	sourceDir := setupSourceDir(t)
-	outputDir := filepath.Join(t.TempDir(), "deploy")
-
 	p := New("test-plugin").
 		WithLauncherHook(GuestDefinition(&stubGuestDefinitionHandler{}).WithEntrypoint("ep-a")).
 		WithLauncherHook(GuestDefinition(&stubGuestDefinitionHandler{}).WithEntrypoint("ep-b")).
 		WithNodeHook(NodeHookPreVMStart, NodeHandler(&stubNodeHandler{}).WithEntrypoint("ep-a"))
-	if err := p.generate(outputDir, sourceDir); err != nil {
-		t.Fatal(err)
-	}
+	_, outputDir := generatePlugin(t, p)
 
 	cr := readPluginCR(t, outputDir)
 
@@ -1595,14 +1469,9 @@ func TestGenerateMultiEntrypointPluginCR(t *testing.T) {
 }
 
 func TestGenerateDaemonSetContainerArgs(t *testing.T) {
-	sourceDir := setupSourceDir(t)
-	outputDir := filepath.Join(t.TempDir(), "deploy")
-
 	p := New("test-plugin").
 		WithNodeHook(NodeHookPreVMStart, NodeHandler(&stubNodeHandler{}).WithEntrypoint("ep-a"))
-	if err := p.generate(outputDir, sourceDir); err != nil {
-		t.Fatal(err)
-	}
+	_, outputDir := generatePlugin(t, p)
 
 	var ds testDaemonSet
 	readAndUnmarshal(t, findGeneratedFile(t, outputDir, "ep-a-daemonset.yaml"), &ds)
@@ -1614,20 +1483,15 @@ func TestGenerateDaemonSetContainerArgs(t *testing.T) {
 		t.Fatalf("expected args %v, got %v", expectedArgs, container.Args)
 	}
 
-	if !strings.Contains(container.Image, "test-plugin") {
-		t.Fatalf("expected image to use plugin name, got %q", container.Image)
+	if container.Image != "quay.io/myorg/test-plugin:latest" {
+		t.Fatalf("expected image quay.io/myorg/test-plugin:latest, got %q", container.Image)
 	}
 }
 
 func TestGenerateMAPContainerArgs(t *testing.T) {
-	sourceDir := setupSourceDir(t)
-	outputDir := filepath.Join(t.TempDir(), "deploy")
-
-	plugin := New("test-plugin").
+	p := New("test-plugin").
 		WithLauncherHook(GuestDefinition(&stubGuestDefinitionHandler{}).WithEntrypoint("ep-a"))
-	if err := plugin.generate(outputDir, sourceDir); err != nil {
-		t.Fatal(err)
-	}
+	_, outputDir := generatePlugin(t, p)
 
 	var policy testMAP
 	readAndUnmarshal(t, findGeneratedFile(t, outputDir, "ep-a-mutating-admission-policy.yaml"), &policy)
@@ -1649,15 +1513,10 @@ func TestGenerateMAPContainerArgs(t *testing.T) {
 }
 
 func TestGenerateSingleEntrypointBackwardCompat(t *testing.T) {
-	sourceDir := setupSourceDir(t)
-	outputDir := filepath.Join(t.TempDir(), "deploy")
-
 	p := New("test-plugin").
 		WithLauncherHook(GuestDefinition(&stubGuestDefinitionHandler{})).
 		WithNodeHook(NodeHookPreVMStart, NodeHandler(&stubNodeHandler{}))
-	if err := p.generate(outputDir, sourceDir); err != nil {
-		t.Fatal(err)
-	}
+	_, outputDir := generatePlugin(t, p)
 
 	findGeneratedFile(t, outputDir, "daemonset.yaml")
 	findGeneratedFile(t, outputDir, "mutating-admission-policy.yaml")
@@ -1685,34 +1544,10 @@ func TestGenerateSingleEntrypointBackwardCompat(t *testing.T) {
 	}
 }
 
-func TestGenerateDefaultEntrypointDaemonSetArgs(t *testing.T) {
-	sourceDir := setupSourceDir(t)
-	outputDir := filepath.Join(t.TempDir(), "deploy")
-
-	p := New("test-plugin").WithNodeHook(NodeHookPreVMStart, NodeHandler(&stubNodeHandler{}))
-	if err := p.generate(outputDir, sourceDir); err != nil {
-		t.Fatal(err)
-	}
-
-	var ds testDaemonSet
-	readAndUnmarshal(t, findGeneratedFile(t, outputDir, "daemonset.yaml"), &ds)
-
-	container := ds.Spec.Template.Spec.Containers[0]
-	expectedArgs := []string{"--entrypoint", "test-plugin", "--role", "daemonset"}
-	if !slices.Equal(container.Args, expectedArgs) {
-		t.Fatalf("expected args %v, got %v", expectedArgs, container.Args)
-	}
-}
-
 func TestGenerateNodeSocketPathSubdirectory(t *testing.T) {
-	sourceDir := setupSourceDir(t)
-	outputDir := filepath.Join(t.TempDir(), "deploy")
-
 	p := New("test-plugin").
 		WithNodeHook(NodeHookPreVMStart, NodeHandler(&stubNodeHandler{}).WithEntrypoint("ep-a"))
-	if err := p.generate(outputDir, sourceDir); err != nil {
-		t.Fatal(err)
-	}
+	_, outputDir := generatePlugin(t, p)
 
 	cr := readPluginCR(t, outputDir)
 
@@ -1722,74 +1557,11 @@ func TestGenerateNodeSocketPathSubdirectory(t *testing.T) {
 	}
 }
 
-func TestGeneratePluginCRCELWithoutSidecars(t *testing.T) {
-	sourceDir := setupSourceDir(t)
-	outputDir := filepath.Join(t.TempDir(), "deploy")
-
-	p := New("test-plugin").WithLauncherHook(GuestDefinitionCEL("Domain{Name: 'test'}"))
-	if err := p.generate(outputDir, sourceDir); err != nil {
-		t.Fatal(err)
-	}
-
-	cr := readPluginCR(t, outputDir)
-
-	if len(cr.Spec.LauncherHooks) != 1 {
-		t.Fatalf("expected 1 launcher hook, got %d", len(cr.Spec.LauncherHooks))
-	}
-
-	if cr.Spec.LauncherHooks[0].CEL == nil {
-		t.Fatal("expected CEL launcher hook")
-	}
-
-	if cr.Spec.LauncherHooks[0].CEL.Expression != "Domain{Name: 'test'}" {
-		t.Fatalf("expected expression, got %q", cr.Spec.LauncherHooks[0].CEL.Expression)
-	}
-
-	if cr.Spec.LauncherHooks[0].Sidecar != nil {
-		t.Fatal("expected no sidecar")
-	}
-
-	if len(cr.Spec.MutatingAdmissionPolicies) != 0 {
-		t.Fatalf("expected no admission references without sidecars, got %v", cr.Spec.MutatingAdmissionPolicies)
-	}
-}
-
-func TestGenerateMultipleCELHooks(t *testing.T) {
-	sourceDir := setupSourceDir(t)
-	outputDir := filepath.Join(t.TempDir(), "deploy")
-
-	p := New("test-plugin").
-		WithLauncherHook(GuestDefinitionCEL("Domain{Name: 'a'}")).
-		WithLauncherHook(GuestDefinitionCEL("Domain{Name: 'b'}"))
-	if err := p.generate(outputDir, sourceDir); err != nil {
-		t.Fatal(err)
-	}
-
-	cr := readPluginCR(t, outputDir)
-
-	if len(cr.Spec.LauncherHooks) != 2 {
-		t.Fatalf("expected 2 launcher hooks, got %d", len(cr.Spec.LauncherHooks))
-	}
-
-	if cr.Spec.LauncherHooks[0].CEL == nil || cr.Spec.LauncherHooks[0].CEL.Expression != "Domain{Name: 'a'}" {
-		t.Fatalf("expected first CEL expression, got %+v", cr.Spec.LauncherHooks[0])
-	}
-
-	if cr.Spec.LauncherHooks[1].CEL == nil || cr.Spec.LauncherHooks[1].CEL.Expression != "Domain{Name: 'b'}" {
-		t.Fatalf("expected second CEL expression, got %+v", cr.Spec.LauncherHooks[1])
-	}
-}
-
 func TestGenerateCELWithNodeHook(t *testing.T) {
-	sourceDir := setupSourceDir(t)
-	outputDir := filepath.Join(t.TempDir(), "deploy")
-
 	p := New("test-plugin").
 		WithLauncherHook(GuestDefinitionCEL("Domain{Name: 'test'}")).
 		WithNodeHook(NodeHookPreVMStart, NodeHandler(&stubNodeHandler{}))
-	if err := p.generate(outputDir, sourceDir); err != nil {
-		t.Fatal(err)
-	}
+	sourceDir, outputDir := generatePlugin(t, p)
 
 	cr := readPluginCR(t, outputDir)
 
@@ -1819,52 +1591,28 @@ func TestGenerateCELWithNodeHook(t *testing.T) {
 	}
 }
 
-func TestGenerateCELOnlyNoDockerfile(t *testing.T) {
-	sourceDir := setupSourceDir(t)
-	outputDir := filepath.Join(t.TempDir(), "deploy")
-
+func TestGenerateCELOnlyGeneratesNoBuildOrAdmissionFiles(t *testing.T) {
 	p := New("test-plugin").WithLauncherHook(GuestDefinitionCEL("Domain{Name: 'test'}"))
-	if err := p.generate(outputDir, sourceDir); err != nil {
-		t.Fatal(err)
+	sourceDir, outputDir := generatePlugin(t, p)
+
+	for _, name := range []string{"Dockerfile", "Makefile"} {
+		if _, err := os.Stat(filepath.Join(sourceDir, name)); !os.IsNotExist(err) {
+			t.Fatalf("CEL-only plugin should not generate %s", name)
+		}
 	}
 
-	if _, err := os.Stat(filepath.Join(sourceDir, "Dockerfile")); !os.IsNotExist(err) {
-		t.Fatal("CEL-only plugin should not generate Dockerfile")
-	}
-
-	if _, err := os.Stat(filepath.Join(sourceDir, "Makefile")); !os.IsNotExist(err) {
-		t.Fatal("CEL-only plugin should not generate Makefile")
-	}
-}
-
-func TestGenerateCELOnlyNoMAP(t *testing.T) {
-	sourceDir := setupSourceDir(t)
-	outputDir := filepath.Join(t.TempDir(), "deploy")
-
-	p := New("test-plugin").WithLauncherHook(GuestDefinitionCEL("Domain{Name: 'test'}"))
-	if err := p.generate(outputDir, sourceDir); err != nil {
-		t.Fatal(err)
-	}
-
-	if generatedFileExists(outputDir, "mutating-admission-policy.yaml") {
-		t.Fatal("CEL-only plugin should not generate MAP")
-	}
-
-	if generatedFileExists(outputDir, "mutating-admission-policy-binding.yaml") {
-		t.Fatal("CEL-only plugin should not generate MAP binding")
+	for _, suffix := range []string{"mutating-admission-policy.yaml", "mutating-admission-policy-binding.yaml"} {
+		if generatedFileExists(outputDir, suffix) {
+			t.Fatalf("CEL-only plugin should not generate %s", suffix)
+		}
 	}
 }
 
 func TestGenerateMixedSidecarAndCEL(t *testing.T) {
-	sourceDir := setupSourceDir(t)
-	outputDir := filepath.Join(t.TempDir(), "deploy")
-
 	p := New("test-plugin").
 		WithLauncherHook(GuestDefinition(&stubGuestDefinitionHandler{})).
 		WithLauncherHook(GuestDefinitionCEL("Domain{Name: 'mutated'}"))
-	if err := p.generate(outputDir, sourceDir); err != nil {
-		t.Fatal(err)
-	}
+	_, outputDir := generatePlugin(t, p)
 
 	cr := readPluginCR(t, outputDir)
 
@@ -1889,17 +1637,12 @@ func TestGenerateMixedSidecarAndCEL(t *testing.T) {
 }
 
 func TestGenerateCELWithPerHookSettings(t *testing.T) {
-	sourceDir := setupSourceDir(t)
-	outputDir := filepath.Join(t.TempDir(), "deploy")
-
 	p := New("test-plugin").WithLauncherHook(
 		GuestDefinitionCEL("Domain{Name: 'test'}").
 			WithCondition("vmi.Name == 'my-vmi'").
 			WithFailureStrategy(Ignore),
 	)
-	if err := p.generate(outputDir, sourceDir); err != nil {
-		t.Fatal(err)
-	}
+	_, outputDir := generatePlugin(t, p)
 
 	cr := readPluginCR(t, outputDir)
 
@@ -1923,14 +1666,9 @@ func TestGenerateCELWithPerHookSettings(t *testing.T) {
 }
 
 func TestGenerateCELExpressionWithDoubleQuotes(t *testing.T) {
-	sourceDir := setupSourceDir(t)
-	outputDir := filepath.Join(t.TempDir(), "deploy")
-
 	expr := `Domain{Title: "test"}`
 	p := New("test-plugin").WithLauncherHook(GuestDefinitionCEL(expr))
-	if err := p.generate(outputDir, sourceDir); err != nil {
-		t.Fatal(err)
-	}
+	_, outputDir := generatePlugin(t, p)
 
 	cr := readPluginCR(t, outputDir)
 

@@ -15,11 +15,6 @@ KUBEVIRTCI_CONFIG_PATH="$(kubevirtci::path)/_ci-configs"
 source "${KUBEVIRTCI_CONFIG_PATH}/${KUBEVIRT_PROVIDER}/config-provider-${KUBEVIRT_PROVIDER}.sh"
 : ${manifest_docker_prefix:?"manifest_docker_prefix not set - is the cluster running?"}
 
-if [ ! -d "tests" ]; then
-    echo "No tests/ directory found. Skipping functional tests."
-    exit 0
-fi
-
 ARGS=("--timeout=1h" "-v")
 
 # Allow callers to inject extra ginkgo flags (e.g., --focus, --label-filter).

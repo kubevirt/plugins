@@ -5,7 +5,9 @@ The SDK is versioned after KubeVirt: SDK `vX.Y.Z` targets KubeVirt `vX.Y` (see
 
 ## Branches
 
-- `main` follows the plugin API of KubeVirt's development branch.
+- `main` follows the plugin API of KubeVirt's development branch, so
+  `kubevirt.io/api` may sit at a pseudo-version of that branch until a
+  release tag carries the new hook API.
 - `release-X.Y` holds SDK `vX.Y`. Cut it from `main` no later than when the
   first change for the KubeVirt `vX.(Y+1)` plugin API is merged to `main`,
   normally when KubeVirt branches its own `release-X.Y`. Tag `vX.Y.0` on it once
@@ -66,7 +68,8 @@ On `release-X.Y` (or on `main` if the branch is not cut yet), once KubeVirt
 4. Point `cluster/kubevirtci_tag.txt` and `KUBEVIRT_PROVIDER`
    (`cluster/kubevirtci.sh`) at a kubevirtci provider that KubeVirt `vX.Y`
    supports.
-5. Update the compatibility table in `README.md`.
+5. Update the compatibility table and the vendored `libvirtxml` version in
+   `README.md`.
 6. Validate:
 
    ```bash

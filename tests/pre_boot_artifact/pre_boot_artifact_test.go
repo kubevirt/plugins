@@ -66,8 +66,7 @@ var _ = Describe("PreBoot Artifact Replacement", func() {
 	It("should replace the cloud-init ISO atomically and boot the VM from the replacement", func() {
 		ns := framework.TestContext.Namespace
 
-		testPlugin := newPlugin().WithNamespace(ns).WithImage(framework.TestContext.ContainerPrefix + "/pre_boot_artifact:latest")
-		framework.TestContext.DeployPlugin(testPlugin, ns)
+		framework.TestContext.DeploySuitePlugin(newPlugin(), ns, "pre_boot_artifact")
 
 		userData := "#!/bin/sh\necho \"marker: " + markerBefore + "\" > /dev/console\n"
 		vmi := framework.TestContext.CreateVMI(ns, framework.WithCloudInitNoCloud(userData), framework.WithSerialConsoleLog())

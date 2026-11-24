@@ -31,13 +31,6 @@ type GuestDefinitionHandler interface {
 	GuestDefinition(ctx context.Context, req *GuestDefinitionRequest) error
 }
 
-// GuestDefinitionFunc adapts a function to a GuestDefinitionHandler.
-type GuestDefinitionFunc func(ctx context.Context, req *GuestDefinitionRequest) error
-
-func (f GuestDefinitionFunc) GuestDefinition(ctx context.Context, req *GuestDefinitionRequest) error {
-	return f(ctx, req)
-}
-
 // PreBootRequest is the input to a PreBoot handler.
 type PreBootRequest struct {
 	// VMI is the VirtualMachineInstance about to start.
@@ -70,13 +63,6 @@ type PreBootResponse struct{}
 // while the launcher proceeds.
 type PreBootHandler interface {
 	PreBoot(ctx context.Context, req *PreBootRequest) (*PreBootResponse, error)
-}
-
-// PreBootFunc adapts a function to a PreBootHandler.
-type PreBootFunc func(ctx context.Context, req *PreBootRequest) (*PreBootResponse, error)
-
-func (f PreBootFunc) PreBoot(ctx context.Context, req *PreBootRequest) (*PreBootResponse, error) {
-	return f(ctx, req)
 }
 
 // LibvirtMigrationConfig is the libvirt migration configuration KubeVirt is
@@ -113,13 +99,6 @@ type PreMigrationSourceHandler interface {
 	PreMigrationSource(ctx context.Context, req *PreMigrationSourceRequest) (*PreMigrationSourceResponse, error)
 }
 
-// PreMigrationSourceFunc adapts a function to a PreMigrationSourceHandler.
-type PreMigrationSourceFunc func(ctx context.Context, req *PreMigrationSourceRequest) (*PreMigrationSourceResponse, error)
-
-func (f PreMigrationSourceFunc) PreMigrationSource(ctx context.Context, req *PreMigrationSourceRequest) (*PreMigrationSourceResponse, error) {
-	return f(ctx, req)
-}
-
 // NodeHookResponse is the response of a node hook. It is empty today, but
 // KubeVirt's ExecuteNodeHookResponse can grow fields, and mapping them here
 // keeps handler signatures stable.
@@ -130,11 +109,4 @@ type NodeHookResponse struct{}
 // its workers to one handler instance.
 type NodeHookHandler interface {
 	ExecuteNodeHook(ctx context.Context, req *NodeHookRequest) (*NodeHookResponse, error)
-}
-
-// NodeHookFunc adapts a function to a NodeHookHandler.
-type NodeHookFunc func(ctx context.Context, req *NodeHookRequest) (*NodeHookResponse, error)
-
-func (f NodeHookFunc) ExecuteNodeHook(ctx context.Context, req *NodeHookRequest) (*NodeHookResponse, error) {
-	return f(ctx, req)
 }

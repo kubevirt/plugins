@@ -1,6 +1,7 @@
 package plugin
 
 import (
+	"cmp"
 	"fmt"
 	"slices"
 	"strings"
@@ -9,6 +10,7 @@ import (
 	"github.com/kubevirt/plugins/pkg/sdk/cel"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
+	"k8s.io/apimachinery/pkg/api/validate/content"
 )
 
 // maxHooksPerPlugin matches the Plugin CRD's MaxItems bound on
@@ -63,7 +65,7 @@ func New(name string) *Plugin {
 	if name == "" {
 		panic("plugin name must not be empty")
 	}
-	validateName(name)
+	validateK8sName("plugin name", name)
 	return &Plugin{name: name, namespace: "default"}
 }
 
@@ -213,7 +215,7 @@ func (p *Plugin) WithImagePullPolicy(policy string) *Plugin {
 // virt-launcher pods carrying these labels. KubeVirt copies VMI labels to
 // the launcher pod, so labelling VMIs scopes the plugin to them; without it
 // the sidecar is injected into every virt-launcher pod while the Plugins
-// feature gate is on - see the README section on sidecar injection scope.
+// feature gate is on - see the README's "Scoping sidecar injection" section.
 // Plugins without sidecar hooks generate no injection policy, so the labels
 // are ignored for them.
 func (p *Plugin) WithSidecarPodLabels(labels map[string]string) *Plugin {
@@ -309,10 +311,6 @@ func (o *NodeHookOption) WithEntrypoint(name string) *NodeHookOption {
 	return o
 }
 
-func validateName(name string) {
-	validateK8sName("plugin name", name)
-}
-
 func validateEntrypoint(name string) {
 	if name == "" {
 		return
@@ -321,18 +319,8 @@ func validateEntrypoint(name string) {
 }
 
 func validateK8sName(label, name string) {
-	if len(name) > 63 {
-		panic(fmt.Sprintf("%s %q exceeds 63 characters", label, name))
-	}
-
-	for i, char := range name {
-		if !((char >= 'a' && char <= 'z') || (char >= '0' && char <= '9') || char == '-') {
-			panic(fmt.Sprintf("%s %q contains invalid character %q at position %d; must contain only lowercase letters, digits, and hyphens", label, name, string(char), i))
-		}
-	}
-
-	if name[0] == '-' || name[len(name)-1] == '-' {
-		panic(fmt.Sprintf("%s %q must not start or end with a hyphen", label, name))
+	if errs := content.IsDNS1123Label(name); len(errs) > 0 {
+		panic(fmt.Sprintf("%s %q is invalid: %s", label, name, strings.Join(errs, "; ")))
 	}
 }
 
@@ -340,53 +328,12 @@ func validateK8sName(label, name string) {
 // label; both are embedded in the generated CEL match conditions, whose
 // string literals the label character set keeps safe.
 func validateSidecarPodLabel(key, value string) {
-	if key == "" {
-		panic("sidecar pod label key must not be empty")
+	if errs := content.IsLabelKey(key); len(errs) > 0 {
+		panic(fmt.Sprintf("invalid sidecar pod label key %q: %s", key, strings.Join(errs, "; ")))
 	}
-
-	name := key
-	if separator := strings.LastIndex(key, "/"); separator >= 0 {
-		prefix := key[:separator]
-		name = key[separator+1:]
-		if len(prefix) > 253 {
-			panic(fmt.Sprintf("sidecar pod label key %q prefix exceeds 253 characters", key))
-		}
-		for i, char := range prefix {
-			if !((char >= 'a' && char <= 'z') || (char >= '0' && char <= '9') || char == '-' || char == '.') {
-				panic(fmt.Sprintf("sidecar pod label key %q prefix contains invalid character %q at position %d; must contain only lowercase letters, digits, '-' and '.'", key, string(char), i))
-			}
-		}
+	if errs := content.IsLabelValue(value); len(errs) > 0 {
+		panic(fmt.Sprintf("invalid sidecar pod label value %q for key %q: %s", value, key, strings.Join(errs, "; ")))
 	}
-
-	validateK8sLabelPart(fmt.Sprintf("sidecar pod label key %q", key), name)
-	validateK8sLabelPart(fmt.Sprintf("sidecar pod label value for key %q", key), value)
-}
-
-// validateK8sLabelPart validates s as the name or value part of a Kubernetes
-// label: at most 63 characters of letters, digits, '-', '_' and '.',
-// starting and ending with a letter or digit. Values may be empty.
-func validateK8sLabelPart(label, s string) {
-	if len(s) > 63 {
-		panic(fmt.Sprintf("%s %q exceeds 63 characters", label, s))
-	}
-
-	if s == "" {
-		return
-	}
-
-	for i, char := range s {
-		if !isLetterOrDigit(byte(char)) && char != '-' && char != '_' && char != '.' {
-			panic(fmt.Sprintf("%s %q contains invalid character %q at position %d; must contain only letters, digits, '-', '_' and '.'", label, s, string(char), i))
-		}
-	}
-
-	if !isLetterOrDigit(s[0]) || !isLetterOrDigit(s[len(s)-1]) {
-		panic(fmt.Sprintf("%s %q must start and end with a letter or digit", label, s))
-	}
-}
-
-func isLetterOrDigit(char byte) bool {
-	return (char >= 'a' && char <= 'z') || (char >= 'A' && char <= 'Z') || (char >= '0' && char <= '9')
 }
 
 func validateFailureStrategy(strategy FailureStrategy) {
@@ -412,10 +359,7 @@ func validateSocketPath(label, path string) {
 }
 
 func (p *Plugin) resolveEntrypoint(entrypoint string) string {
-	if entrypoint == "" {
-		return p.name
-	}
-	return entrypoint
+	return cmp.Or(entrypoint, p.name)
 }
 
 // entrypointResourceName returns the name of the per-entrypoint DaemonSet
@@ -435,8 +379,5 @@ func (p *Plugin) sidecarContainerName(entrypoint string) string {
 }
 
 func (p *Plugin) resolveImage() string {
-	if p.image != "" {
-		return p.image
-	}
-	return "quay.io/myorg/" + p.name + ":latest"
+	return cmp.Or(p.image, "quay.io/myorg/"+p.name+":latest")
 }
