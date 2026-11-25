@@ -5,9 +5,14 @@
 // parameter is present with that value and a nil field means it is absent.
 // In a response, a nil field keeps the parameter's current value, a set
 // wrapper overrides it (zero values included), and an empty wrapper or empty
-// list removes it. Flags are changed with separate set and clear masks in
-// which every other bit keeps its value; a bit present in both masks is an
-// error.
+// list removes it; for example, Int32(2) overrides a parameter and
+// RemoveInt32() removes it. Flags are changed with separate set and clear
+// masks in which every other bit keeps its value; a bit present in both masks
+// is an error.
+//
+// A nil response changes nothing. With the default Fail strategy a hook
+// error aborts the migration, and the error appears in the VMI's
+// status.migrationState.failureReason.
 package migration
 
 import (
