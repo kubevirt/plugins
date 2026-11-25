@@ -5,7 +5,15 @@
 // which is then swapped in. The swap preserves the original's ownership and
 // permissions, so a PreBoot sidecar needs no CAP_CHOWN: the artifacts are
 // owned by the qemu user (uid and gid 107), the same user the generated
-// sidecars run as. See the README for PreBoot authoring guidance.
+// sidecars run as.
+//
+// A PreBoot hook may run again after a failed start and its filesystem
+// changes are never rolled back, so write idempotently, replace artifacts
+// atomically with [ReplaceFile] and [ReplaceDir], and pass the hook's context
+// to everything it does. Keep the default Fail strategy: a timed-out hook is
+// not stopped, and with Ignore the VM starts while the hook keeps writing.
+// A PreBoot sidecar is mounted into the ephemeral-disks volume of every pod
+// it is injected into, including VMIs whose hook condition skips the hook.
 package artifact
 
 import (
