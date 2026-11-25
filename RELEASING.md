@@ -68,9 +68,7 @@ On `release-X.Y` (or on `main` if the branch is not cut yet), once KubeVirt
 4. Point `cluster/kubevirtci_tag.txt` and `KUBEVIRT_PROVIDER`
    (`cluster/kubevirtci.sh`) at a kubevirtci provider that KubeVirt `vX.Y`
    supports.
-5. Update the compatibility table and the vendored `libvirtxml` version in
-   `README.md`.
-6. Validate:
+5. Validate:
 
    ```bash
    make test
@@ -81,7 +79,7 @@ On `release-X.Y` (or on `main` if the branch is not cut yet), once KubeVirt
    make cluster-down
    ```
 
-7. If `release-X.Y` does not exist yet, create it from the validated commit.
+6. If `release-X.Y` does not exist yet, create it from the validated commit.
    Tag the release on `release-X.Y` and publish GitHub release notes:
 
    ```bash
@@ -96,7 +94,7 @@ On `release-X.Y` (or on `main` if the branch is not cut yet), once KubeVirt
 
 1. Cherry-pick fixes from `main` to `release-X.Y`, or fix the branch directly
    when `main` has moved on.
-2. On every KubeVirt `vX.Y.Z`, repeat steps 3 and 6 above. When that release
+2. On every KubeVirt `vX.Y.Z`, repeat steps 3 and 5 above. When that release
    changes the hook API or the content of a dependency from step 1, repeat
-   steps 1-3 and 5-6 instead.
+   steps 1-3 and 5 instead.
 3. Tag `vX.Y.(Z+1)` on `release-X.Y`.
