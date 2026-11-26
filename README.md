@@ -94,7 +94,7 @@ kubectl apply -f deploy/
 Running `generate` produces build files in the project root and YAML manifests in `deploy/`:
 
 ```
-Dockerfile                                    # Multi-stage build (distroless runtime)
+Containerfile                                 # Multi-stage build (distroless runtime)
 Makefile                                      # build/push targets using podman or docker
 deploy/
   01-plugin.yaml                              # Plugin CR - registers hooks with KubeVirt
@@ -135,7 +135,7 @@ Each container runs `serve --entrypoint <name> --role sidecar|daemonset` to serv
 subset of hooks: domain hooks in sidecars, node hooks in DaemonSets.
 
 The manifests pass these flags as container `args`, which override the image's `CMD`, so
-plugin images must use `ENTRYPOINT ["<binary>", "serve"]`, like the generated `Dockerfile`.
+plugin images must use `ENTRYPOINT ["<binary>", "serve"]`, like the generated `Containerfile`.
 
 ## Limitations
 
