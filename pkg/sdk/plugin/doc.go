@@ -1,7 +1,7 @@
 // Package plugin builds KubeVirt plugins: create one with [New], register
 // hooks with the With* methods and call [Plugin.Execute] from main. The
 // "serve" subcommand runs the hook servers and "generate" writes the
-// Dockerfile, Makefile and deployment manifests.
+// Containerfile, Makefile and deployment manifests.
 //
 // # Launcher and node hooks
 //
@@ -50,6 +50,6 @@
 // entrypoint, and each container serves only its subset. A hook point can be
 // registered once per entrypoint, so compose transformations in one handler.
 // Plugin images must keep ENTRYPOINT ["<binary>", "serve"] like the
-// generated Dockerfile, since the manifests pass their flags as container
+// generated Containerfile, since the manifests pass their flags as container
 // args.
 package plugin
