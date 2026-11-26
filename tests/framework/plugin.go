@@ -20,7 +20,7 @@ func (f *Framework) DeployPlugin(p *plugin.Plugin, namespace string) {
 	outputDir, err := os.MkdirTemp("", "plugin-deploy-")
 	Expect(err).NotTo(HaveOccurred())
 
-	// Generate also writes a Dockerfile and Makefile into the current
+	// Generate also writes a Containerfile and Makefile into the current
 	// directory and reads the Go version from its go.mod; run it in a
 	// scratch directory so the repository's own files are left alone.
 	sourceDir, err := os.MkdirTemp("", "plugin-source-")

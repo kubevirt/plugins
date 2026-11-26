@@ -138,7 +138,7 @@ spec:
   policyName: {{ .Name }}
 `
 
-const dockerfileTmplStr = `FROM golang:{{ .GoVersion }} AS builder
+const containerfileTmplStr = `FROM golang:{{ .GoVersion }} AS builder
 WORKDIR /app
 COPY go.mod go.sum ./
 RUN go mod download
@@ -158,7 +158,7 @@ GO_VERSION ?= {{ .GoVersion }}
 .PHONY: build push test vet
 
 build:
-	$(CONTAINER_ENGINE) build -t $(IMAGE) .
+	$(CONTAINER_ENGINE) build -t $(IMAGE) -f Containerfile .
 
 push: build
 	$(CONTAINER_ENGINE) push $(IMAGE)
@@ -250,12 +250,12 @@ func (p *Plugin) generate(outputDir, sourceDir string) error {
 			return err
 		}
 		goVersion = builderGoVersion(goVersion)
-		dockerfileContent, err := renderTemplate(dockerfileTmplStr, struct{ GoVersion string }{goVersion})
+		containerfileContent, err := renderTemplate(containerfileTmplStr, struct{ GoVersion string }{goVersion})
 		if err != nil {
 			return err
 		}
-		if err := os.WriteFile(filepath.Join(sourceDir, "Dockerfile"), []byte(dockerfileContent), 0644); err != nil {
-			return fmt.Errorf("write Dockerfile: %w", err)
+		if err := os.WriteFile(filepath.Join(sourceDir, "Containerfile"), []byte(containerfileContent), 0644); err != nil {
+			return fmt.Errorf("write Containerfile: %w", err)
 		}
 
 		makefileContent, err := renderTemplate(makefileTmplStr, struct {
