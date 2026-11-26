@@ -5,7 +5,7 @@
 | [![nightly](https://prow.ci.kubevirt.io/badge.svg?jobs=periodic-kubevirt-plugins-e2e-nightly)](https://testgrid.k8s.io/kubevirt-plugins-periodics#periodic-kubevirt-plugins-e2e-nightly) | [![latest release](https://prow.ci.kubevirt.io/badge.svg?jobs=periodic-kubevirt-plugins-e2e-latest-release)](https://testgrid.k8s.io/kubevirt-plugins-periodics#periodic-kubevirt-plugins-e2e-latest-release) | [![previous release](https://prow.ci.kubevirt.io/badge.svg?jobs=periodic-kubevirt-plugins-e2e-previous-release)](https://testgrid.k8s.io/kubevirt-plugins-periodics#periodic-kubevirt-plugins-e2e-previous-release) | [![proto drift](https://prow.ci.kubevirt.io/badge.svg?jobs=periodic-kubevirt-plugins-hook-proto-drift)](https://testgrid.k8s.io/kubevirt-plugins-periodics#periodic-kubevirt-plugins-hook-proto-drift) |
 
 Go SDK for writing [KubeVirt](https://kubevirt.io) plugins: hooks that customize virtual machines at defined points of their lifecycle without patching KubeVirt itself ([VEP 190](https://github.com/kubevirt/enhancements/tree/main/veps/sig-compute/190-kubevirt-structured-plugins)).
-A plugin is a small Go program; the SDK handles the gRPC plumbing and generates its image build and deployment manifests.
+A plugin is a small Go program; the SDK handles the gRPC plumbing, and the plugin's `generate` command writes its image build and every deployment manifest.
 
 > **Alpha** - the plugin API (KubeVirt v1.9+) is alpha. Expect breaking changes.
 
@@ -66,7 +66,17 @@ make push
 kubectl apply -f deploy/
 ```
 
-`generate` writes a `Dockerfile`, a `Makefile` and `deploy/`: the Plugin CR that registers the hook with KubeVirt and the admission policy that injects the plugin as a sidecar into labelled virt-launcher pods.
+`generate` writes everything needed to build and deploy the plugin, so there are no manifests to write by hand:
+
+| File | Contents | Written when |
+|---|---|---|
+| `Dockerfile` | multi-stage build into a `distroless/static` image that runs `serve` | the plugin serves hooks (not CEL-only) |
+| `Makefile` | `build`, `push`, `test` and `vet` for the image set with `WithImage` | the plugin serves hooks |
+| `deploy/NN-plugin.yaml` | the Plugin CR that registers the hooks with KubeVirt | always |
+| `deploy/NN-mutating-admission-policy.yaml` and `-binding.yaml` | the admission policy that injects the plugin as a sidecar into matching virt-launcher pods | launcher hooks |
+| `deploy/NN-daemonset.yaml` and `NN-rbac.yaml` | the DaemonSet serving node hooks on every node, and its RBAC from `WithRBACRules` | node hooks |
+
+Files are numbered in apply order; this example gets `01-plugin.yaml`, `02-mutating-admission-policy.yaml` and `03-mutating-admission-policy-binding.yaml`.
 Start a VMI labelled `smbios-manufacturer=true`; inside the guest, `cat /sys/class/dmi/id/sys_vendor` prints `KubeVirt-<vmi name>`.
 
 ## Hook points
