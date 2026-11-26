@@ -10,7 +10,7 @@ full kubevirt dependency tree.
 
 Until then, keep these files in sync with upstream by running
 `make update-proto`. The files are fetched from the kubevirt ref in
-`KUBEVIRT_PROTO_REF` (a commit pinned in `hack/config.sh`, moved together
+`KUBEVIRT_PROTO_REF` (a ref pinned in `hack/config.sh`, moved together
 with the `kubevirt.io/api` dependency): via `curl` from
 raw.githubusercontent.com, or via `git show` from a local clone when
 `KUBEVIRT_DIR` points at one (the ref is resolved, nothing is checked

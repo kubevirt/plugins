@@ -14,10 +14,8 @@ require (
 	k8s.io/api v0.36.4
 	k8s.io/apimachinery v0.36.4
 	k8s.io/client-go v0.36.4
-	// Verified byte-identical to KubeVirt release-1.10 @6f56294e for core/v1
-	// and plugin/v1alpha1; re-pin to the v1.10.0 tag at GA.
-	kubevirt.io/api v1.10.0-beta.0.0.20261029030351-f99bef8ca6b0
-	libvirt.org/go/libvirtxml v1.12002.0
+	kubevirt.io/api v1.10.0
+	libvirt.org/go/libvirtxml v1.12007.0
 	sigs.k8s.io/yaml v1.6.0
 )
 

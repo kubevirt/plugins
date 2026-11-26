@@ -52,9 +52,10 @@ On `release-X.Y` (or on `main` if the branch is not cut yet), once KubeVirt
 
 1. Align dependencies with KubeVirt:
    - `kubevirt.io/api` to the latest `vX.Y.Z`.
-   - `libvirt.org/go/libvirtxml`, `google.golang.org/grpc` and
-     `google.golang.org/protobuf` to the versions in KubeVirt's `go.mod` at
-     that tag.
+   - `libvirt.org/go/libvirtxml` and `google.golang.org/protobuf` to the
+     versions in KubeVirt's `go.mod` at that tag.
+   - `google.golang.org/grpc` and `golang.org/x/net` to no lower than
+     KubeVirt's versions; they may stay ahead to carry security fixes.
    - `k8s.io/*`, including `k8s.io/client-go`, to the Kubernetes release
      `kubevirt.io/api` requires, then `go mod tidy`.
    - The Go images in `hack/builder/Dockerfile` (tag and digest) and
