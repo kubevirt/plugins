@@ -70,7 +70,7 @@ kubectl apply -f deploy/
 
 | File | Contents | Written when |
 |---|---|---|
-| `Dockerfile` | multi-stage build into a `distroless/static` image that runs `serve` | the plugin serves hooks (not CEL-only) |
+| `Containerfile` | multi-stage build into a `distroless/static` image that runs `serve` | the plugin serves hooks (not CEL-only) |
 | `Makefile` | `build`, `push`, `test` and `vet` for the image set with `WithImage` | the plugin serves hooks |
 | `deploy/NN-plugin.yaml` | the Plugin CR that registers the hooks with KubeVirt | always |
 | `deploy/NN-mutating-admission-policy.yaml` and `-binding.yaml` | the admission policy that injects the plugin as a sidecar into matching virt-launcher pods | launcher hooks |

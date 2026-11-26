@@ -1150,18 +1150,18 @@ func TestGenerateMAPBinding(t *testing.T) {
 	}
 }
 
-func TestGenerateDockerfile(t *testing.T) {
+func TestGenerateContainerfile(t *testing.T) {
 	p := New("test-plugin").WithNodeHook(NodeHookPreVMStart, NodeHandler(&stubNodeHandler{}))
 	sourceDir, _ := generatePlugin(t, p)
 
-	content := readFileContent(t, filepath.Join(sourceDir, "Dockerfile"))
+	content := readFileContent(t, filepath.Join(sourceDir, "Containerfile"))
 
 	if !strings.Contains(content, "FROM golang:1.26 AS builder") {
-		t.Fatalf("expected Dockerfile to contain Go version 1.26, got:\n%s", content)
+		t.Fatalf("expected Containerfile to contain Go version 1.26, got:\n%s", content)
 	}
 
 	if !strings.Contains(content, `ENTRYPOINT ["/plugin", "serve"]`) {
-		t.Fatalf("expected Dockerfile to contain ENTRYPOINT, got:\n%s", content)
+		t.Fatalf("expected Containerfile to contain ENTRYPOINT, got:\n%s", content)
 	}
 }
 
@@ -1181,6 +1181,10 @@ func TestGenerateMakefile(t *testing.T) {
 
 	if !strings.Contains(content, "docker") {
 		t.Fatalf("expected Makefile to contain docker fallback, got:\n%s", content)
+	}
+
+	if !strings.Contains(content, "$(CONTAINER_ENGINE) build -t $(IMAGE) -f Containerfile .") {
+		t.Fatalf("expected Makefile build target to use Containerfile, got:\n%s", content)
 	}
 
 	if !strings.Contains(content, "GO_VERSION ?= 1.26") {
@@ -1256,7 +1260,7 @@ func TestBuilderGoVersion(t *testing.T) {
 
 func TestGenerate(t *testing.T) {
 	// The public entrypoint uses the process working directory as the
-	// source dir: Dockerfile and Makefile land next to go.mod, manifests
+	// source dir: Containerfile and Makefile land next to go.mod, manifests
 	// under the output dir.
 	t.Chdir(setupSourceDir(t))
 
@@ -1265,7 +1269,7 @@ func TestGenerate(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	for _, name := range []string{"Dockerfile", "Makefile"} {
+	for _, name := range []string{"Containerfile", "Makefile"} {
 		if _, err := os.Stat(name); os.IsNotExist(err) {
 			t.Fatalf("expected %s in the working directory", name)
 		}
@@ -1330,7 +1334,7 @@ func TestGenerateFileNumbering(t *testing.T) {
 		}
 	}
 
-	for _, name := range []string{"Dockerfile", "Makefile"} {
+	for _, name := range []string{"Containerfile", "Makefile"} {
 		if _, err := os.Stat(filepath.Join(sourceDir, name)); os.IsNotExist(err) {
 			t.Fatalf("expected %s in source dir %s", name, sourceDir)
 		}
@@ -1585,9 +1589,9 @@ func TestGenerateCELWithNodeHook(t *testing.T) {
 		t.Fatal("expected no MAP for CEL-only launcher hooks")
 	}
 
-	// Dockerfile should be generated (node hook needs container)
-	if _, err := os.Stat(filepath.Join(sourceDir, "Dockerfile")); os.IsNotExist(err) {
-		t.Fatal("expected Dockerfile for node hook plugin")
+	// Containerfile should be generated (node hook needs container)
+	if _, err := os.Stat(filepath.Join(sourceDir, "Containerfile")); os.IsNotExist(err) {
+		t.Fatal("expected Containerfile for node hook plugin")
 	}
 }
 
@@ -1595,7 +1599,7 @@ func TestGenerateCELOnlyGeneratesNoBuildOrAdmissionFiles(t *testing.T) {
 	p := New("test-plugin").WithLauncherHook(GuestDefinitionCEL("Domain{Name: 'test'}"))
 	sourceDir, outputDir := generatePlugin(t, p)
 
-	for _, name := range []string{"Dockerfile", "Makefile"} {
+	for _, name := range []string{"Containerfile", "Makefile"} {
 		if _, err := os.Stat(filepath.Join(sourceDir, name)); !os.IsNotExist(err) {
 			t.Fatalf("CEL-only plugin should not generate %s", name)
 		}
